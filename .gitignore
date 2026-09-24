@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.idea
+.vscode
+dist/*.exe
+!dist/.gitkeep
+apps/live/node_modules/
+apps/live/dist/
+apps/live/src-tauri/target/

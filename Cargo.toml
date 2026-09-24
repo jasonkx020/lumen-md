@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lumen-core",
+    "crates/lumen-render",
+    "crates/lumen-app",
+    "crates/lumen-cli",
+]
+exclude = ["apps/live/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+lumen-core = { path = "crates/lumen-core" }
+lumen-render = { path = "crates/lumen-render" }
+lumen-app = { path = "crates/lumen-app" }
+
+anyhow = "=1.0.81"
+thiserror = "=1.0.58"
+serde = { version = "=1.0.197", features = ["derive"] }
+serde_json = "=1.0.114"
+sha2 = "=0.10.8"
+hex = "=0.4.3"
+comrak = { version = "=0.22.0", default-features = false }
+eframe = { version = "=0.27.2", default-features = false, features = ["glow", "default_fonts"] }
+egui = "=0.27.2"
+image = { version = "=0.24.9", default-features = false, features = ["png", "jpeg", "gif"] }
+# pin transitive deps for rustc 1.77 / no edition2024
+url = "=2.5.0"
+idna = "=0.5.0"
+webbrowser = "=0.8.15"
+getrandom = "=0.2.12"
+libc = "=0.2.153"
+windows-sys = "=0.52.0"
+bitflags = "=2.4.2"
+once_cell = "=1.19.0"
+ahash = "=0.8.11"
+hashbrown = "=0.14.3"
+unicode-segmentation = "=1.11.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"

@@ -1,0 +1,12 @@
+[package]
+name = "lumen-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+comrak = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

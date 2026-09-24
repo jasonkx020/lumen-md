@@ -1,0 +1,13 @@
+[package]
+name = "lumen-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lumen-core = { workspace = true }
+egui = { workspace = true }
+anyhow = { workspace = true }
+image = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+comrak = { workspace = true }
