@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   fsCreate,
   fsRead,
   fsWrite,
+  fsWriteAbs,
   openAbsoluteFile,
   openWorkspace,
+  registerAndWriteAbs,
 } from "./api";
 import { CrepeEditor, type CrepeEditorHandle } from "./components/CrepeEditor";
 import { FileTree } from "./components/FileTree";
@@ -17,6 +19,15 @@ import {
 } from "./components/MenuBar";
 import { runFormatAction } from "./components/editorCommands";
 import { SourceEditor } from "./components/SourceEditor";
+import { TabBar } from "./components/TabBar";
+import {
+  absKey,
+  createStandaloneTab,
+  createUntitledTab,
+  createWorkspaceTab,
+  type EditorTab,
+  wsKey,
+} from "./tabs";
 import "./App.css";
 
 const WELCOME = `# Lumen MD Live
@@ -31,7 +42,7 @@ const WELCOME = `# Lumen MD Live
 | 1.2 | 核心模块确定为 Rust: ime-ffi、Cargo workspace、cbindgen、Tokio 冷路径 |
 
 - 段落 → 表格，或 \`/\` → 表格，或输入 \`|3x3|\` 后空格
-- \`Ctrl+S\` 保存 · \`Ctrl+/\` 切换源代码
+- \`Ctrl+S\` 保存 · \`Ctrl+/\` 切换源代码 · \`Ctrl+W\` 关闭标签
 `;
 
 function isMdPath(p: string) {
@@ -43,14 +54,25 @@ function isMdPath(p: string) {
   );
 }
 
+function bootstrapTab(): EditorTab {
+  const t = createUntitledTab(WELCOME);
+  t.title = "欢迎";
+  t.dirty = false;
+  t.savedContent = WELCOME;
+  return t;
+}
+
 export default function App() {
   const editorRef = useRef<CrepeEditorHandle>(null);
   const markdownRef = useRef(WELCOME);
+  const tabsRef = useRef<EditorTab[]>([]);
+  const activeIdRef = useRef<string | null>(null);
+
+  const initial = bootstrapTab();
+  const [tabs, setTabs] = useState<EditorTab[]>([initial]);
+  const [activeId, setActiveId] = useState<string | null>(initial.id);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
-  const [activeRel, setActiveRel] = useState<string | null>(null);
   const [markdown, setMarkdown] = useState(WELCOME);
-  const [savedMarkdown, setSavedMarkdown] = useState(WELCOME);
-  const [dirty, setDirty] = useState(false);
   const [sourceMode, setSourceMode] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [showOutline, setShowOutline] = useState(true);
@@ -58,63 +80,195 @@ export default function App() {
   const [treeKey, setTreeKey] = useState(0);
   const [status, setStatus] = useState("就绪");
 
-  const title = activeRel ?? "未命名";
+  tabsRef.current = tabs;
+  activeIdRef.current = activeId;
 
-  const updateMarkdown = useCallback(
-    (md: string, markDirty = true) => {
-      markdownRef.current = md;
-      setMarkdown(md);
-      if (markDirty) setDirty(md !== savedMarkdown);
-    },
-    [savedMarkdown],
-  );
+  const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+  const dirty = activeTab?.dirty ?? false;
+  const title = activeTab?.title ?? "未命名";
+  const activeRel = activeTab?.relPath ?? null;
 
-  const markDirtyFrom = useCallback(
-    (md: string) => updateMarkdown(md, true),
-    [updateMarkdown],
-  );
+  const currentEditorMarkdown = useCallback(() => {
+    if (sourceMode) return markdownRef.current;
+    return editorRef.current?.getMarkdown() ?? markdownRef.current;
+  }, [sourceMode]);
 
-  const applyToEditors = useCallback((content: string) => {
-    markdownRef.current = content;
-    setMarkdown(content);
-    editorRef.current?.setMarkdown(content);
+  const flushActiveToTabs = useCallback((): EditorTab[] => {
+    const id = activeIdRef.current;
+    const md = currentEditorMarkdown();
+    markdownRef.current = md;
+    const next = tabsRef.current.map((t) => {
+      if (t.id !== id) return t;
+      return {
+        ...t,
+        content: md,
+        dirty: md !== t.savedContent,
+      };
+    });
+    tabsRef.current = next;
+    setTabs(next);
+    setMarkdown(md);
+    return next;
+  }, [currentEditorMarkdown]);
+
+  const loadTabIntoEditor = useCallback((tab: EditorTab) => {
+    markdownRef.current = tab.content;
+    setMarkdown(tab.content);
+    editorRef.current?.setMarkdown(tab.content);
   }, []);
 
-  const loadFile = useCallback(
-    async (rel: string) => {
-      try {
-        const content = await fsRead(rel);
-        setActiveRel(rel);
-        setSavedMarkdown(content);
-        setDirty(false);
-        applyToEditors(content);
-        setStatus(`已打开 ${rel}`);
-      } catch (e) {
-        setStatus(`打开失败: ${e}`);
-      }
+  const markDirtyFrom = useCallback((md: string) => {
+    markdownRef.current = md;
+    setMarkdown(md);
+    const id = activeIdRef.current;
+    setTabs((prev) => {
+      const next = prev.map((t) =>
+        t.id === id
+          ? { ...t, content: md, dirty: md !== t.savedContent }
+          : t,
+      );
+      tabsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const focusTab = useCallback(
+    (id: string) => {
+      if (id === activeIdRef.current) return;
+      flushActiveToTabs();
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (!tab) return;
+      setActiveId(id);
+      activeIdRef.current = id;
+      loadTabIntoEditor(tab);
+      setStatus(`已切换 ${tab.title}`);
     },
-    [applyToEditors],
+    [flushActiveToTabs, loadTabIntoEditor],
+  );
+
+  const openOrFocusTab = useCallback(
+    (tab: EditorTab) => {
+      flushActiveToTabs();
+      const existing = tabsRef.current.find((t) => t.key === tab.key);
+      if (existing) {
+        setActiveId(existing.id);
+        activeIdRef.current = existing.id;
+        // 脏 Tab 不强制用磁盘覆盖
+        if (!existing.dirty) {
+          const updated = {
+            ...existing,
+            content: tab.content,
+            savedContent: tab.savedContent,
+            dirty: false,
+          };
+          const next = tabsRef.current.map((t) =>
+            t.id === existing.id ? updated : t,
+          );
+          tabsRef.current = next;
+          setTabs(next);
+          loadTabIntoEditor(updated);
+        } else {
+          loadTabIntoEditor(existing);
+        }
+        setStatus(`已打开 ${existing.title}`);
+        return;
+      }
+      const next = [...tabsRef.current, tab];
+      tabsRef.current = next;
+      setTabs(next);
+      setActiveId(tab.id);
+      activeIdRef.current = tab.id;
+      loadTabIntoEditor(tab);
+      setStatus(`已打开 ${tab.title}`);
+    },
+    [flushActiveToTabs, loadTabIntoEditor],
+  );
+
+  const closeTab = useCallback(
+    (id: string) => {
+      flushActiveToTabs();
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (!tab) return;
+      if (tab.dirty) {
+        const ok = window.confirm(`「${tab.title}」尚未保存，确定关闭？`);
+        if (!ok) return;
+      }
+      let next = tabsRef.current.filter((t) => t.id !== id);
+      if (next.length === 0) {
+        next = [bootstrapTab()];
+      }
+      tabsRef.current = next;
+      setTabs(next);
+      if (activeIdRef.current === id) {
+        const fallback = next[next.length - 1]!;
+        setActiveId(fallback.id);
+        activeIdRef.current = fallback.id;
+        loadTabIntoEditor(fallback);
+      }
+      setStatus(`已关闭 ${tab.title}`);
+    },
+    [flushActiveToTabs, loadTabIntoEditor],
   );
 
   const doSave = useCallback(async () => {
-    const md = sourceMode
-      ? markdownRef.current
-      : (editorRef.current?.getMarkdown() ?? markdownRef.current);
-    if (!activeRel) {
-      setStatus("请先打开或新建文件");
-      return;
-    }
+    flushActiveToTabs();
+    const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (!tab) return;
+    const md = tab.content;
+
     try {
-      await fsWrite(activeRel, md);
-      markdownRef.current = md;
-      setMarkdown(md);
-      setSavedMarkdown(md);
-      setDirty(false);
-      setStatus(`已保存 ${activeRel}`);
+      if (tab.relPath) {
+        await fsWrite(tab.relPath, md);
+        const next = tabsRef.current.map((t) =>
+          t.id === tab.id
+            ? { ...t, content: md, savedContent: md, dirty: false }
+            : t,
+        );
+        tabsRef.current = next;
+        setTabs(next);
+        setStatus(`已保存 ${tab.relPath}`);
+        return;
+      }
+      if (tab.absPath) {
+        await fsWriteAbs(tab.absPath, md);
+        const next = tabsRef.current.map((t) =>
+          t.id === tab.id
+            ? { ...t, content: md, savedContent: md, dirty: false }
+            : t,
+        );
+        tabsRef.current = next;
+        setTabs(next);
+        setStatus(`已保存 ${tab.title}`);
+        return;
+      }
+
+      // untitled → 另存为
+      const selected = await save({
+        filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+        defaultPath: `${tab.title === "欢迎" ? "untitled" : tab.title}.md`,
+      });
+      if (!selected) return;
+      const abs = await registerAndWriteAbs(selected, md);
+      const upgraded: EditorTab = {
+        ...tab,
+        key: absKey(abs),
+        title: abs.replace(/\\/g, "/").split("/").pop() || tab.title,
+        content: md,
+        savedContent: md,
+        dirty: false,
+        absPath: abs,
+        relPath: undefined,
+      };
+      const next = tabsRef.current.map((t) =>
+        t.id === tab.id ? upgraded : t,
+      );
+      tabsRef.current = next;
+      setTabs(next);
+      setStatus(`已保存 ${upgraded.title}`);
     } catch (e) {
       setStatus(`保存失败: ${e}`);
     }
-  }, [activeRel, sourceMode]);
+  }, [flushActiveToTabs]);
 
   const openFolderDialog = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -137,46 +291,63 @@ export default function App() {
     if (!selected || Array.isArray(selected)) return;
     try {
       const res = await openAbsoluteFile(selected);
-      setWorkspaceRoot(res.workspace_root);
-      setActiveRel(res.rel_path);
-      setSavedMarkdown(res.content);
-      setDirty(false);
-      applyToEditors(res.content);
-      setTreeKey((k) => k + 1);
-      setStatus(`已打开 ${res.rel_path}`);
+      if (res.mode === "workspace" && res.rel_path) {
+        openOrFocusTab(createWorkspaceTab(res.rel_path, res.content));
+      } else if (res.abs_path) {
+        // 独立文件：不 setWorkspaceRoot(parent)
+        openOrFocusTab(createStandaloneTab(res.abs_path, res.content));
+      }
     } catch (e) {
       setStatus(`打开文件失败: ${e}`);
     }
-  }, [applyToEditors]);
+  }, [openOrFocusTab]);
+
+  const openWorkspaceFile = useCallback(
+    async (rel: string) => {
+      const key = wsKey(rel);
+      const existing = tabsRef.current.find((t) => t.key === key);
+      if (existing?.dirty) {
+        focusTab(existing.id);
+        return;
+      }
+      try {
+        const content = await fsRead(rel);
+        openOrFocusTab(createWorkspaceTab(rel, content));
+      } catch (e) {
+        setStatus(`打开失败: ${e}`);
+      }
+    },
+    [focusTab, openOrFocusTab],
+  );
 
   const newFile = useCallback(async () => {
-    if (!workspaceRoot) {
-      setStatus("请先打开文件夹");
+    if (workspaceRoot) {
+      const name = window.prompt("文件名（相对路径）", "untitled.md");
+      if (!name) return;
+      const rel = name.replace(/\\/g, "/");
+      try {
+        await fsCreate(rel);
+        setTreeKey((k) => k + 1);
+        await openWorkspaceFile(rel);
+      } catch (e) {
+        setStatus(`新建失败: ${e}`);
+      }
       return;
     }
-    const name = window.prompt("文件名（相对路径）", "untitled.md");
-    if (!name) return;
-    try {
-      await fsCreate(name.replace(/\\/g, "/"));
-      setTreeKey((k) => k + 1);
-      await loadFile(name.replace(/\\/g, "/"));
-    } catch (e) {
-      setStatus(`新建失败: ${e}`);
-    }
-  }, [workspaceRoot, loadFile]);
+    openOrFocusTab(createUntitledTab(""));
+    setStatus("已新建未命名文件");
+  }, [workspaceRoot, openOrFocusTab, openWorkspaceFile]);
 
   const handleDropPath = useCallback(
     async (path: string) => {
       try {
         if (isMdPath(path)) {
           const res = await openAbsoluteFile(path);
-          setWorkspaceRoot(res.workspace_root);
-          setActiveRel(res.rel_path);
-          setSavedMarkdown(res.content);
-          setDirty(false);
-          applyToEditors(res.content);
-          setTreeKey((k) => k + 1);
-          setStatus(`已打开 ${res.rel_path}`);
+          if (res.mode === "workspace" && res.rel_path) {
+            openOrFocusTab(createWorkspaceTab(res.rel_path, res.content));
+          } else if (res.abs_path) {
+            openOrFocusTab(createStandaloneTab(res.abs_path, res.content));
+          }
         } else {
           const root = await openWorkspace(path);
           setWorkspaceRoot(root);
@@ -187,20 +358,18 @@ export default function App() {
         setStatus(`拖放打开失败: ${e}`);
       }
     },
-    [applyToEditors],
+    [openOrFocusTab],
   );
 
   const toggleSourceMode = useCallback(() => {
     setSourceMode((prev) => {
       if (!prev) {
-        // 进入源代码：从 Live 拉取最新 Markdown
         const md = editorRef.current?.getMarkdown() ?? markdownRef.current;
         markdownRef.current = md;
         setMarkdown(md);
         setStatus("源代码模式 — 可直接编辑 Markdown");
         return true;
       }
-      // 回到 Live：把源码写回 Crepe
       const md = markdownRef.current;
       queueMicrotask(() => {
         editorRef.current?.setMarkdown(md);
@@ -251,7 +420,10 @@ export default function App() {
         e.preventDefault();
         void openFolderDialog();
       }
-      // Ctrl+/ 或 Ctrl+Shift+/（部分键盘布局）
+      if (mod && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        if (activeIdRef.current) closeTab(activeIdRef.current);
+      }
       if (mod && (e.key === "/" || e.code === "Slash" || e.key === "?")) {
         e.preventDefault();
         toggleSourceMode();
@@ -273,7 +445,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [doSave, openFolderDialog, sourceMode, toggleSourceMode]);
+  }, [closeTab, doSave, openFolderDialog, sourceMode, toggleSourceMode]);
 
   const onAction = useCallback(
     (action: MenuAction) => {
@@ -310,7 +482,7 @@ export default function App() {
           break;
         case "about":
           window.alert(
-            "Lumen MD Live 0.1\n真所见即所得（Milkdown Crepe）\n需要 Windows 10/11 + WebView2\nCtrl+/ 切换源代码模式",
+            "Lumen MD Live 0.1\n真所见即所得（Milkdown Crepe）\n需要 Windows 10/11 + WebView2\nCtrl+/ 源码 · Ctrl+W 关闭标签",
           );
           break;
         default:
@@ -338,20 +510,27 @@ export default function App() {
         title={title}
         sourceMode={sourceMode}
       />
+      <TabBar
+        tabs={tabs}
+        activeId={activeId}
+        onSelect={focusTab}
+        onClose={closeTab}
+      />
       <div className="main-row">
         {showSidebar ? (
           <aside className="sidebar left">
             <FileTree
               workspaceRoot={workspaceRoot}
               activeRel={activeRel}
-              onOpenFile={(rel) => void loadFile(rel)}
+              onOpenFile={(rel) => void openWorkspaceFile(rel)}
               refreshKey={treeKey}
             />
           </aside>
         ) : null}
         <main className="editor-pane">
-          {/* 双编辑器常驻，避免切换时丢失内容 */}
-          <div className={sourceMode ? "editor-layer is-hidden" : "editor-layer"}>
+          <div
+            className={sourceMode ? "editor-layer is-hidden" : "editor-layer"}
+          >
             <CrepeEditor
               ref={editorRef}
               initialMarkdown={WELCOME}
@@ -377,6 +556,7 @@ export default function App() {
         <span>{status}</span>
         <span className="status-mode">
           {sourceMode ? "源代码" : "Live"}
+          {tabs.length > 1 ? ` · ${tabs.length} 标签` : ""}
         </span>
       </footer>
     </div>

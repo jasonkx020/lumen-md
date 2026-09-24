@@ -174,3 +174,43 @@ fn path_under(path: &Path, root: &Path) -> bool {
     };
     p.starts_with(&r)
 }
+
+/// 读取绝对路径文本（独立文件模式）。
+pub fn read_abs_text(path: &Path) -> anyhow::Result<String> {
+    let meta = fs::metadata(path)?;
+    if meta.len() > MAX_FILE_BYTES {
+        anyhow::bail!(
+            "文件超过软上限 {} bytes（{}）",
+            MAX_FILE_BYTES,
+            meta.len()
+        );
+    }
+    let bytes = fs::read(path)?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("仅支持 UTF-8"))
+}
+
+/// 原子写入绝对路径（独立文件模式）。
+pub fn write_abs_text(path: &Path, content: &str) -> anyhow::Result<()> {
+    if content.len() as u64 > MAX_FILE_BYTES {
+        anyhow::bail!("内容超过软上限 {} bytes", MAX_FILE_BYTES);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("md.tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub fn is_allowed_text_ext(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".md") || name.ends_with(".markdown") || name.ends_with(".txt")
+}
