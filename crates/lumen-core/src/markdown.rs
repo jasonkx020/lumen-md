@@ -59,11 +59,12 @@ impl MarkdownEngine {
 
     pub fn options(&self) -> ComrakOptions {
         let mut opts = ComrakOptions::default();
-        // CommonMark 核心；Lumen 预留扩展开关（M1 不启用 GFM 表等，管道接口先齐）
-        opts.extension.strikethrough = false;
-        opts.extension.table = false;
-        opts.extension.autolink = matches!(self.dialect, Dialect::Lumen);
-        opts.extension.tasklist = false;
+        let lumen = matches!(self.dialect, Dialect::Lumen);
+        // Lumen：GFM 表 / 任务列表 / 删除线；CommonMark 保持严格
+        opts.extension.strikethrough = lumen;
+        opts.extension.table = lumen;
+        opts.extension.autolink = lumen;
+        opts.extension.tasklist = lumen;
         opts.extension.superscript = false;
         opts.extension.footnotes = false;
         opts.extension.description_lists = false;

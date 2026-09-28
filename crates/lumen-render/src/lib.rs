@@ -5,5 +5,7 @@ mod paint;
 mod serialize;
 
 pub use model::{HeadingOutline, InlineSpan, RenderBlock, RenderKind, RenderModel};
-pub use paint::{PreviewState, show_preview};
-pub use serialize::InlineFormat;
+pub use paint::{show_preview, PreviewState};
+pub use serialize::{
+    inlines_to_md, parse_inlines_md, plain_text, plain_to_inlines, InlineFormat,
+};

@@ -1,10 +1,17 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  extractOutline,
+  type OutlineHeading,
+} from "../markdown/extractOutline";
+import { THEMES, themeMenuAction, type ThemeId } from "../theme/androidStudio";
 
 export type MenuAction =
   | "openFolder"
   | "openFile"
   | "save"
   | "saveAsHint"
+  | "exportPdf"
+  | "exportDoc"
   | "newFile"
   | "quit"
   | "undo"
@@ -31,8 +38,8 @@ export type MenuAction =
   | "toggleSource"
   | "toggleSidebar"
   | "toggleOutline"
-  | "themeLight"
-  | "themeDark"
+  | `theme:${ThemeId}`
+  | "openSettings"
   | "about";
 
 type Item =
@@ -51,6 +58,9 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "新建 Markdown", action: "newFile" },
       { type: "sep" },
       { type: "item", label: "保存", action: "save", shortcut: "Ctrl+S" },
+      { type: "sep" },
+      { type: "item", label: "导出为 PDF…", action: "exportPdf" },
+      { type: "item", label: "导出为 Word (.docx)…", action: "exportDoc" },
       { type: "sep" },
       { type: "item", label: "退出", action: "quit" },
     ],
@@ -108,9 +118,17 @@ const MENUS: MenuDef[] = [
   {
     id: "theme",
     label: "主题",
+    items: THEMES.map((t) => ({
+      type: "item" as const,
+      label: t.label,
+      action: themeMenuAction(t.id),
+    })),
+  },
+  {
+    id: "settings",
+    label: "设置",
     items: [
-      { type: "item", label: "浅色", action: "themeLight" },
-      { type: "item", label: "深色", action: "themeDark" },
+      { type: "item", label: "首选项…", action: "openSettings" },
     ],
   },
   {
@@ -128,47 +146,92 @@ type Props = {
 };
 
 export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const menusRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (!openId) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (menusRef.current?.contains(t)) return;
+      setOpenId(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenId(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openId]);
+
+  const runItem = (action: MenuAction) => {
+    setOpenId(null);
+    onAction(action);
+  };
+
   return (
     <header className="menu-bar">
-      <nav className="menus" aria-label="主菜单">
-        {MENUS.map((m) => (
-          <div className="menu" key={m.id}>
-            <button type="button" className="menu-label">
-              {m.label}
-            </button>
-            <div className="menu-dropdown" role="menu">
-              {m.items.map((it, i) =>
-                it.type === "sep" ? (
-                  <div className="menu-sep" key={`s-${i}`} />
-                ) : (
-                  <button
-                    type="button"
-                    className={
-                      "menu-item" +
-                      (it.action === "toggleSource" && sourceMode
-                        ? " is-checked"
-                        : "")
-                    }
-                    key={it.action + it.label}
-                    role="menuitemcheckbox"
-                    aria-checked={
-                      it.action === "toggleSource" ? sourceMode : undefined
-                    }
-                    onClick={() => onAction(it.action)}
-                  >
-                    <span>
-                      {it.action === "toggleSource" && sourceMode ? "✓ " : ""}
-                      {it.label}
-                    </span>
-                    {it.shortcut ? (
-                      <span className="shortcut">{it.shortcut}</span>
-                    ) : null}
-                  </button>
-                ),
-              )}
+      <nav className="menus" aria-label="主菜单" ref={menusRef}>
+        {MENUS.map((m) => {
+          const open = openId === m.id;
+          return (
+            <div
+              className={"menu" + (open ? " is-open" : "")}
+              key={m.id}
+              onMouseEnter={() => {
+                // 已有菜单打开时，滑过其它顶栏项切换（经典菜单栏）
+                if (openId) setOpenId(m.id);
+              }}
+            >
+              <button
+                type="button"
+                className="menu-label"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                onClick={() =>
+                  setOpenId((cur) => (cur === m.id ? null : m.id))
+                }
+              >
+                {m.label}
+              </button>
+              {open ? (
+                <div className="menu-dropdown" role="menu">
+                  {m.items.map((it, i) =>
+                    it.type === "sep" ? (
+                      <div className="menu-sep" key={`s-${i}`} />
+                    ) : (
+                      <button
+                        type="button"
+                        className={
+                          "menu-item" +
+                          (it.action === "toggleSource" && sourceMode
+                            ? " is-checked"
+                            : "")
+                        }
+                        key={it.action + it.label}
+                        role="menuitem"
+                        onClick={() => runItem(it.action)}
+                      >
+                        <span>
+                          {it.action === "toggleSource" && sourceMode
+                            ? "✓ "
+                            : ""}
+                          {it.label}
+                        </span>
+                        {it.shortcut ? (
+                          <span className="shortcut">{it.shortcut}</span>
+                        ) : null}
+                      </button>
+                    ),
+                  )}
+                </div>
+              ) : null}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </nav>
       <div className="title-chip" title={title}>
         {dirty ? "• " : ""}
@@ -189,15 +252,14 @@ export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
   );
 }
 
-export function Outline({ markdown }: { markdown: string }): ReactNode {
-  const headings = markdown
-    .split("\n")
-    .map((line, i) => {
-      const m = /^(#{1,6})\s+(.+)$/.exec(line);
-      if (!m) return null;
-      return { level: m[1].length, text: m[2], line: i + 1 };
-    })
-    .filter(Boolean) as { level: number; text: string; line: number }[];
+export function Outline({
+  markdown,
+  onJump,
+}: {
+  markdown: string;
+  onJump?: (heading: OutlineHeading) => void;
+}): ReactNode {
+  const headings = extractOutline(markdown);
 
   if (!headings.length) {
     return <div className="outline empty">暂无标题</div>;
@@ -210,7 +272,13 @@ export function Outline({ markdown }: { markdown: string }): ReactNode {
           className={`outline-h${h.level}`}
           style={{ paddingLeft: (h.level - 1) * 10 }}
         >
-          {h.text}
+          <button
+            type="button"
+            title={`跳转到第 ${h.line} 行`}
+            onClick={() => onJump?.(h)}
+          >
+            {h.text}
+          </button>
         </li>
       ))}
     </ul>

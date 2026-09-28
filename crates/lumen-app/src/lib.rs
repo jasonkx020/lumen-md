@@ -9,7 +9,7 @@ use lumen_core::{Dialect, FileEntry, MarkdownEngine, Workspace};
 use lumen_render::{InlineFormat, PreviewState, RenderKind};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const UNDO_MAX: usize = 40;
 
@@ -445,11 +445,7 @@ impl LumenApp {
                 .add_enabled(has, egui::Button::new("无序列表"))
                 .clicked()
             {
-                self.preview.cmd_set_paragraph(RenderKind::ListItem {
-                    ordered: false,
-                    start: 1,
-                    index: 0,
-                });
+                self.preview.cmd_set_paragraph(RenderKind::ListItem { ordered: false, start: 1, index: 0, checked: None });
                 self.sync_from_preview();
                 ui.close_menu();
             }
@@ -457,11 +453,7 @@ impl LumenApp {
                 .add_enabled(has, egui::Button::new("有序列表"))
                 .clicked()
             {
-                self.preview.cmd_set_paragraph(RenderKind::ListItem {
-                    ordered: true,
-                    start: 1,
-                    index: 0,
-                });
+                self.preview.cmd_set_paragraph(RenderKind::ListItem { ordered: true, start: 1, index: 0, checked: None });
                 self.sync_from_preview();
                 ui.close_menu();
             }
@@ -473,6 +465,32 @@ impl LumenApp {
                     info: String::new(),
                     literal: String::new(),
                 });
+                self.sync_from_preview();
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(has, egui::Button::new("引用"))
+                .clicked()
+            {
+                self.preview.cmd_set_paragraph(RenderKind::BlockQuote);
+                self.sync_from_preview();
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(has, egui::Button::new("任务列表"))
+                .clicked()
+            {
+                self.preview.cmd_toggle_task();
+                self.sync_from_preview();
+                ui.close_menu();
+            }
+            if ui.button("插入表格 3×3").clicked() {
+                self.preview.cmd_insert_table(3, 3);
+                self.sync_from_preview();
+                ui.close_menu();
+            }
+            if ui.button("插入代码块").clicked() {
+                self.preview.cmd_insert_code_block();
                 self.sync_from_preview();
                 ui.close_menu();
             }
@@ -515,6 +533,18 @@ impl LumenApp {
                 .clicked()
             {
                 self.preview.open_link_dialog();
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(has, egui::Button::new("删除线"))
+                .clicked()
+            {
+                self.preview.cmd_inline(InlineFormat::Strike);
+                self.sync_from_preview();
+                ui.close_menu();
+            }
+            if ui.button("插入图片…").clicked() {
+                self.preview.open_image_dialog();
                 ui.close_menu();
             }
             if ui
@@ -607,7 +637,22 @@ impl eframe::App for LumenApp {
         }
 
         // 快捷键
-        let (ctrl, shift, key_s, key_z, key_y, key_b, key_i) = ctx.input(|i| {
+        let (ctrl, shift, key_s, key_z, key_y, key_b, key_i, heading_level) = ctx.input(|i| {
+            let heading = if i.key_pressed(egui::Key::Num1) {
+                Some(1u8)
+            } else if i.key_pressed(egui::Key::Num2) {
+                Some(2)
+            } else if i.key_pressed(egui::Key::Num3) {
+                Some(3)
+            } else if i.key_pressed(egui::Key::Num4) {
+                Some(4)
+            } else if i.key_pressed(egui::Key::Num5) {
+                Some(5)
+            } else if i.key_pressed(egui::Key::Num6) {
+                Some(6)
+            } else {
+                None
+            };
             (
                 i.modifiers.ctrl,
                 i.modifiers.shift,
@@ -616,6 +661,7 @@ impl eframe::App for LumenApp {
                 i.key_pressed(egui::Key::Y),
                 i.key_pressed(egui::Key::B),
                 i.key_pressed(egui::Key::I),
+                heading,
             )
         });
         if ctrl && key_s && !shift {
@@ -634,6 +680,17 @@ impl eframe::App for LumenApp {
         if ctrl && key_i && self.preview.selected.is_some() {
             self.preview.cmd_inline(InlineFormat::Emphasis);
             self.sync_from_preview();
+        }
+        if ctrl && shift && ctx.input(|i| i.key_pressed(egui::Key::X)) && self.preview.selected.is_some() {
+            self.preview.cmd_inline(InlineFormat::Strike);
+            self.sync_from_preview();
+        }
+        if ctrl && self.preview.selected.is_some() {
+            if let Some(level) = heading_level {
+                self.preview
+                    .cmd_set_paragraph(RenderKind::Heading { level });
+                self.sync_from_preview();
+            }
         }
 
         // 顶栏：品牌 + 菜单 + 路径
@@ -830,7 +887,7 @@ impl eframe::App for LumenApp {
                     ui.label("用「段落」「格式」菜单改变标题、列表、加粗等。");
                     ui.label("可将文件夹或 .md 文件拖入窗口直接打开。");
                     ui.label("「视图 → 源代码模式」可查看原始 Markdown。");
-                    ui.label("Ctrl+S 保存 · Ctrl+B 加粗 · Ctrl+I 斜体");
+                    ui.label("Ctrl+S 保存 · Ctrl+B/I 粗斜体 · Ctrl+1..6 标题 · Ctrl+Shift+X 删除线");
                 });
         }
         if self.show_about {
@@ -901,6 +958,12 @@ impl eframe::App for LumenApp {
                         });
                 } else {
                     Frame::none()
+                        .fill(Color32::from_rgb(0xF7, 0xF8, 0xFA))
+                        .inner_margin(Margin::symmetric(12.0, 6.0))
+                        .show(ui, |ui| {
+                            self.draw_format_toolbar(ui);
+                        });
+                    Frame::none()
                         .fill(Color32::WHITE)
                         .inner_margin(Margin::symmetric(28.0, 16.0))
                         .show(ui, |ui| {
@@ -909,8 +972,79 @@ impl eframe::App for LumenApp {
                         });
                 }
             });
+    }
+}
 
-        ctx.request_repaint_after(Duration::from_millis(50));
+impl LumenApp {
+    fn draw_format_toolbar(&mut self, ui: &mut egui::Ui) {
+        let has = self.preview.selected.is_some();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if ui
+                .add_enabled(has, egui::Button::new("正文").small())
+                .clicked()
+            {
+                self.preview.cmd_set_paragraph(RenderKind::Paragraph);
+                self.sync_from_preview();
+            }
+            for level in 1u8..=6 {
+                if ui
+                    .add_enabled(has, egui::Button::new(format!("H{level}")).small())
+                    .clicked()
+                {
+                    self.preview
+                        .cmd_set_paragraph(RenderKind::Heading { level });
+                    self.sync_from_preview();
+                }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(has, egui::Button::new("B").small())
+                .on_hover_text("加粗")
+                .clicked()
+            {
+                self.preview.cmd_inline(InlineFormat::Strong);
+                self.sync_from_preview();
+            }
+            if ui
+                .add_enabled(has, egui::Button::new("I").small())
+                .on_hover_text("斜体")
+                .clicked()
+            {
+                self.preview.cmd_inline(InlineFormat::Emphasis);
+                self.sync_from_preview();
+            }
+            if ui
+                .add_enabled(has, egui::Button::new("S").small())
+                .on_hover_text("删除线")
+                .clicked()
+            {
+                self.preview.cmd_inline(InlineFormat::Strike);
+                self.sync_from_preview();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(has, egui::Button::new("链接").small())
+                .clicked()
+            {
+                self.preview.open_link_dialog();
+            }
+            if ui.small_button("图片").clicked() {
+                self.preview.open_image_dialog();
+            }
+            if ui.small_button("代码块").clicked() {
+                self.preview.cmd_insert_code_block();
+                self.sync_from_preview();
+            }
+            if ui.small_button("表格").clicked() {
+                self.preview.cmd_insert_table(3, 3);
+                self.sync_from_preview();
+            }
+            if ui.small_button("任务").clicked() {
+                self.preview.cmd_toggle_task();
+                self.sync_from_preview();
+            }
+        });
     }
 }
 

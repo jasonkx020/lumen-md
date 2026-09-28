@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import {
   EditorView,
   keymap,
@@ -22,129 +22,177 @@ import {
   foldGutter,
   foldKeymap,
 } from "@codemirror/language";
+import {
+  DEFAULT_THEME,
+  themeIsDark,
+  type ThemeId,
+} from "../theme/androidStudio";
+
+export type SourceEditorHandle = {
+  scrollToLine: (line: number) => void;
+  focus: () => void;
+  getSelection: () => string | null;
+  replaceSelection: (text: string) => boolean;
+  getHost: () => HTMLElement | null;
+};
 
 type Props = {
   value: string;
   onChange: (v: string) => void;
-  theme?: "light" | "dark";
+  theme?: ThemeId;
   active?: boolean;
+  onContextMenu?: (e: MouseEvent) => void;
 };
 
-export function SourceEditor({
-  value,
-  onChange,
-  theme = "light",
-  active = true,
-}: Props) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
-  const suppressRef = useRef(false);
+export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
+  function SourceEditor(
+    { value, onChange, theme = DEFAULT_THEME, active = true, onContextMenu },
+    ref,
+  ) {
+    const hostRef = useRef<HTMLDivElement>(null);
+    const viewRef = useRef<EditorView | null>(null);
+    const onChangeRef = useRef(onChange);
+    const onContextMenuRef = useRef(onContextMenu);
+    onChangeRef.current = onChange;
+    onContextMenuRef.current = onContextMenu;
+    const suppressRef = useRef(false);
 
-  useEffect(() => {
-    const el = hostRef.current;
-    if (!el) return;
-
-    const onUpdate = EditorView.updateListener.of((u) => {
-      if (suppressRef.current) return;
-      if (u.docChanged) onChangeRef.current(u.state.doc.toString());
-    });
-
-    const themeExt = EditorView.theme(
-      {
-        "&": {
-          height: "100%",
-          fontSize: "14px",
-          backgroundColor: theme === "dark" ? "#1c1917" : "#ffffff",
-          color: theme === "dark" ? "#fafaf9" : "#1c1917",
-        },
-        ".cm-content": {
-          fontFamily:
-            'Consolas, "Cascadia Code", "Sarasa Mono SC", monospace',
-          caretColor: theme === "dark" ? "#2dd4bf" : "#0f766e",
-          padding: "20px 0",
-        },
-        ".cm-gutters": {
-          backgroundColor: theme === "dark" ? "#231f1d" : "#f0ebe3",
-          color: theme === "dark" ? "#a8a29e" : "#78716c",
-          border: "none",
-        },
-        ".cm-activeLine": {
-          backgroundColor:
-            theme === "dark"
-              ? "rgba(45, 212, 191, 0.08)"
-              : "rgba(15, 118, 110, 0.06)",
-        },
-        ".cm-activeLineGutter": {
-          backgroundColor:
-            theme === "dark"
-              ? "rgba(45, 212, 191, 0.12)"
-              : "rgba(15, 118, 110, 0.1)",
-        },
-        "&.cm-focused .cm-cursor": {
-          borderLeftColor: theme === "dark" ? "#2dd4bf" : "#0f766e",
-        },
-        "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-          backgroundColor:
-            theme === "dark"
-              ? "rgba(45, 212, 191, 0.28)"
-              : "rgba(15, 118, 110, 0.2)",
-        },
+    useImperativeHandle(ref, () => ({
+      scrollToLine: (line: number) => {
+        const view = viewRef.current;
+        if (!view) return;
+        const doc = view.state.doc;
+        const target = Math.max(1, Math.min(line, doc.lines));
+        const lineObj = doc.line(target);
+        view.dispatch({
+          selection: { anchor: lineObj.from },
+          effects: EditorView.scrollIntoView(lineObj.from, { y: "start" }),
+        });
+        view.focus();
       },
-      { dark: theme === "dark" },
-    );
+      focus: () => viewRef.current?.focus(),
+      getHost: () => hostRef.current,
+      getSelection: () => {
+        const view = viewRef.current;
+        if (!view) return null;
+        const { from, to } = view.state.selection.main;
+        if (from === to) return null;
+        const text = view.state.sliceDoc(from, to);
+        return text.trim() ? text : null;
+      },
+      replaceSelection: (text: string) => {
+        const view = viewRef.current;
+        if (!view) return false;
+        const { from, to } = view.state.selection.main;
+        if (from === to) return false;
+        view.dispatch({
+          changes: { from, to, insert: text },
+          selection: { anchor: from + text.length },
+        });
+        return true;
+      },
+    }));
 
-    const state = EditorState.create({
-      doc: value,
-      extensions: [
-        lineNumbers(),
-        highlightActiveLine(),
-        highlightActiveLineGutter(),
-        foldGutter(),
-        drawSelection(),
-        history(),
-        bracketMatching(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        markdown(),
-        EditorView.lineWrapping,
-        keymap.of([
-          ...defaultKeymap,
-          ...historyKeymap,
-          ...foldKeymap,
-          indentWithTab,
-        ]),
-        onUpdate,
-        themeExt,
-      ],
-    });
-    const view = new EditorView({ state, parent: el });
-    viewRef.current = view;
-    return () => {
-      view.destroy();
-      viewRef.current = null;
-    };
-    // remount when theme changes for clean theme swap
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme]);
+    useEffect(() => {
+      const el = hostRef.current;
+      if (!el) return;
 
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    const cur = view.state.doc.toString();
-    if (cur === value) return;
-    suppressRef.current = true;
-    view.dispatch({
-      changes: { from: 0, to: cur.length, insert: value },
-    });
-    suppressRef.current = false;
-  }, [value]);
+      const onUpdate = EditorView.updateListener.of((u) => {
+        if (suppressRef.current) return;
+        if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+      });
+
+      const themeExt = EditorView.theme(
+        {
+          "&": {
+            height: "100%",
+            fontSize: "14px",
+            backgroundColor: "var(--editor-bg)",
+            color: "var(--text)",
+          },
+          ".cm-content": {
+            fontFamily: "var(--font-editor)",
+            caretColor: "var(--editor-caret)",
+            padding: "20px 0",
+          },
+          ".cm-gutters": {
+            backgroundColor: "var(--editor-gutter)",
+            color: "var(--muted)",
+            border: "none",
+          },
+          ".cm-activeLine": {
+            backgroundColor: "var(--editor-active-line)",
+          },
+          ".cm-activeLineGutter": {
+            backgroundColor: "var(--editor-active-line)",
+          },
+          "&.cm-focused .cm-cursor": {
+            borderLeftColor: "var(--editor-caret)",
+          },
+          "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+            backgroundColor: "var(--editor-selection)",
+          },
+        },
+        { dark: themeIsDark(theme) },
+      );
+
+      const state = EditorState.create({
+        doc: value,
+        extensions: [
+          lineNumbers(),
+          highlightActiveLine(),
+          highlightActiveLineGutter(),
+          foldGutter(),
+          drawSelection(),
+          history(),
+          bracketMatching(),
+          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          markdown(),
+          EditorView.lineWrapping,
+          keymap.of([
+            ...defaultKeymap,
+            ...historyKeymap,
+            ...foldKeymap,
+            indentWithTab,
+          ]),
+          onUpdate,
+          themeExt,
+        ],
+      });
+      const view = new EditorView({ state, parent: el });
+      viewRef.current = view;
+      return () => {
+        view.destroy();
+        viewRef.current = null;
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [theme]);
+
+    useEffect(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      const cur = view.state.doc.toString();
+      if (cur === value) return;
+      suppressRef.current = true;
+      view.dispatch({
+        changes: { from: 0, to: cur.length, insert: value },
+      });
+      suppressRef.current = false;
+    }, [value]);
 
   useEffect(() => {
     if (active) {
       viewRef.current?.focus();
     }
   }, [active]);
+
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const onCtx = (e: MouseEvent) => onContextMenuRef.current?.(e);
+    el.addEventListener("contextmenu", onCtx);
+    return () => el.removeEventListener("contextmenu", onCtx);
+  }, []);
 
   return (
     <div
@@ -154,4 +202,5 @@ export function SourceEditor({
       aria-hidden={!active}
     />
   );
-}
+  },
+);

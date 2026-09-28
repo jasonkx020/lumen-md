@@ -5,8 +5,12 @@ import {
   useRef,
 } from "react";
 import { Crepe } from "@milkdown/crepe";
+import { editorViewCtx } from "@milkdown/kit/core";
+import { TextSelection } from "@milkdown/kit/prose/state";
 import { replaceAll } from "@milkdown/kit/utils";
 import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
+import { htmlPreviewView } from "../markdown/htmlNodes";
+import { findAnchorFromEvent } from "../links/resolveLink";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 import "@milkdown/prose/tables/style/tables.css";
@@ -17,11 +21,18 @@ export type CrepeEditorHandle = {
   focus: () => void;
   runAction: (fn: (ctx: unknown) => void) => void;
   getCrepe: () => Crepe | null;
+  scrollToHeading: (index: number) => void;
+  getSelection: () => string | null;
+  replaceSelection: (text: string) => boolean;
+  getHost: () => HTMLElement | null;
 };
 
 type Props = {
   initialMarkdown?: string;
   onChange?: (md: string) => void;
+  onLinkClick?: (href: string) => void;
+  onContextMenu?: (e: MouseEvent) => void;
+  htmlEnabled?: boolean;
   className?: string;
 };
 
@@ -30,14 +41,28 @@ function applyMarkdown(crepe: Crepe, md: string) {
 }
 
 export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
-  function CrepeEditor({ initialMarkdown = "", onChange, className }, ref) {
+  function CrepeEditor(
+    {
+      initialMarkdown = "",
+      onChange,
+      onLinkClick,
+      onContextMenu,
+      htmlEnabled = true,
+      className,
+    },
+    ref,
+  ) {
     const rootRef = useRef<HTMLDivElement>(null);
     const crepeRef = useRef<Crepe | null>(null);
     const readyRef = useRef(false);
     const lastMdRef = useRef(normalizeGfmTables(initialMarkdown));
     const onChangeRef = useRef(onChange);
+    const onLinkClickRef = useRef(onLinkClick);
+    const onContextMenuRef = useRef(onContextMenu);
     const suppressRef = useRef(0);
     onChangeRef.current = onChange;
+    onLinkClickRef.current = onLinkClick;
+    onContextMenuRef.current = onContextMenu;
 
     useImperativeHandle(ref, () => ({
       getMarkdown: () => {
@@ -76,6 +101,85 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         c.editor.action(fn as never);
       },
       getCrepe: () => crepeRef.current,
+      getHost: () => rootRef.current,
+      getSelection: () => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return null;
+        try {
+          let text = "";
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { from, to, empty } = view.state.selection;
+            if (!empty) {
+              text = view.state.doc.textBetween(from, to, "\n");
+            }
+          });
+          const t = text.trim();
+          return t ? text : null;
+        } catch {
+          return null;
+        }
+      },
+      replaceSelection: (text: string) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { from, to, empty } = view.state.selection;
+            if (empty) return;
+            view.dispatch(view.state.tr.insertText(text, from, to));
+            ok = true;
+          });
+          return ok;
+        } catch {
+          return false;
+        }
+      },
+      scrollToHeading: (index: number) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return;
+        try {
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { state } = view;
+            let headingIdx = -1;
+            let foundPos: number | null = null;
+            state.doc.descendants((node, pos) => {
+              if (node.type.name !== "heading") return;
+              headingIdx += 1;
+              if (headingIdx === index) {
+                foundPos = pos;
+                return false;
+              }
+            });
+            if (foundPos == null) {
+              // DOM fallback
+              const heads = rootRef.current?.querySelectorAll(
+                ".ProseMirror h1, .ProseMirror h2, .ProseMirror h3, .ProseMirror h4, .ProseMirror h5, .ProseMirror h6",
+              );
+              const el = heads?.[index] as HTMLElement | undefined;
+              el?.scrollIntoView({ behavior: "smooth", block: "start" });
+              return;
+            }
+            const $pos = state.doc.resolve(foundPos + 1);
+            const sel = TextSelection.near($pos);
+            view.dispatch(state.tr.setSelection(sel).scrollIntoView());
+            view.focus();
+            const dom = view.nodeDOM(foundPos);
+            if (dom instanceof HTMLElement) {
+              dom.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+          });
+        } catch {
+          const heads = rootRef.current?.querySelectorAll(
+            ".ProseMirror h1, .ProseMirror h2, .ProseMirror h3, .ProseMirror h4, .ProseMirror h5, .ProseMirror h6",
+          );
+          const el = heads?.[index] as HTMLElement | undefined;
+          el?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      },
     }));
 
     useEffect(() => {
@@ -89,7 +193,6 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           [Crepe.Feature.Table]: true,
         },
         featureConfigs: {
-          // 关闭虚拟光标：表格单元格内原生 caret 才能稳定可见
           [Crepe.Feature.Cursor]: {
             virtual: false,
           },
@@ -126,6 +229,9 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           },
         },
       });
+      if (htmlEnabled) {
+        crepe.editor.use(htmlPreviewView);
+      }
       crepe.on((listener) => {
         listener.markdownUpdated((_ctx, markdown) => {
           if (suppressRef.current > 0) return;
@@ -137,7 +243,6 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
       void crepe.create().then(() => {
         if (disposed) return;
         readyRef.current = true;
-        // 打开文件可能发生在 create 完成前：就绪后再灌入最新内容
         suppressRef.current += 1;
         try {
           applyMarkdown(crepe, lastMdRef.current);
@@ -154,6 +259,39 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         crepeRef.current = null;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [htmlEnabled]);
+
+    useEffect(() => {
+      const el = rootRef.current;
+      if (!el) return;
+      const onClick = (e: MouseEvent) => {
+        if (e.defaultPrevented) return;
+        if (e.button !== 0) return;
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        // 仅拦截真实 <a href>，避免影响 Crepe 工具条 / 按钮
+        const t = e.target as HTMLElement | null;
+        if (t?.closest?.(".milkdown-toolbar, .milkdown-slash-menu, .crepe-menu")) {
+          return;
+        }
+        const href = findAnchorFromEvent(e.target);
+        if (!href) return;
+        e.preventDefault();
+        onLinkClickRef.current?.(href);
+      };
+      const onCtx = (e: MouseEvent) => {
+        const t = e.target as HTMLElement | null;
+        // 工具条等区域保留默认/组件自身菜单
+        if (t?.closest?.(".milkdown-toolbar, .milkdown-slash-menu, .crepe-menu")) {
+          return;
+        }
+        onContextMenuRef.current?.(e);
+      };
+      el.addEventListener("click", onClick, true);
+      el.addEventListener("contextmenu", onCtx);
+      return () => {
+        el.removeEventListener("click", onClick, true);
+        el.removeEventListener("contextmenu", onCtx);
+      };
     }, []);
 
     return <div ref={rootRef} className={className ?? "crepe-host"} />;

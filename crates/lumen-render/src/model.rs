@@ -11,10 +11,27 @@ pub struct InlineSpan {
     pub strong: bool,
     pub emphasis: bool,
     pub code: bool,
+    pub strikethrough: bool,
     pub link_url: Option<String>,
     pub image_src: Option<String>,
     pub soft_break: bool,
     pub hard_break: bool,
+}
+
+impl InlineSpan {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            strong: false,
+            emphasis: false,
+            code: false,
+            strikethrough: false,
+            link_url: None,
+            image_src: None,
+            soft_break: false,
+            hard_break: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -22,10 +39,20 @@ pub enum RenderKind {
     Paragraph,
     Heading { level: u8 },
     BlockQuote,
-    ListItem { ordered: bool, start: u32, index: u32 },
+    ListItem {
+        ordered: bool,
+        start: u32,
+        index: u32,
+        checked: Option<bool>,
+    },
     CodeBlock { info: String, literal: String },
     ThematicBreak,
     HtmlBlock { literal: String },
+    /// GFM 表格：headers 为一行单元格；rows 为数据行。
+    Table {
+        headers: Vec<Vec<InlineSpan>>,
+        rows: Vec<Vec<Vec<InlineSpan>>>,
+    },
     /// 扩展挂载点（M2+）
     ExtensionStub { name: String },
 }
@@ -78,6 +105,10 @@ impl RenderModel {
     pub fn matches(&self, source: &str, dialect: Dialect) -> bool {
         self.fingerprint == MarkdownEngine::fingerprint(source, dialect)
     }
+
+    pub fn recompute_total_height(&mut self) {
+        self.total_height = self.blocks.iter().map(|b| b.est_height).sum();
+    }
 }
 
 fn flatten<'a>(
@@ -103,7 +134,6 @@ fn flatten<'a>(
             }
         }
         NodeValue::List(list) => {
-            let _ordered = matches!(list.list_type, ListType::Ordered);
             let start = list.start as u32;
             let mut idx = 0u32;
             for c in node.children() {
@@ -121,54 +151,33 @@ fn flatten<'a>(
             }
         }
         NodeValue::Item(_) => {
-            let mut inlines = Vec::new();
-            let mut nested = Vec::new();
-            for c in node.children() {
-                match &c.data.borrow().value {
-                    NodeValue::Paragraph | NodeValue::Heading(_) => {
-                        collect_inlines(c, &mut inlines);
-                    }
-                    NodeValue::List(_) | NodeValue::BlockQuote | NodeValue::CodeBlock(_) => {
-                        nested.push(c);
-                    }
-                    _ => {
-                        collect_inlines(c, &mut inlines);
-                    }
-                }
-            }
-            let ordered = node
-                .parent()
-                .and_then(|p| match &p.data.borrow().value {
-                    NodeValue::List(l) => Some(matches!(l.list_type, ListType::Ordered)),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            let kind = RenderKind::ListItem {
-                ordered,
-                start: list_start,
-                index: list_index,
+            push_list_item(
+                node,
+                depth,
+                blocks,
+                outline,
+                in_blockquote,
+                list_start,
+                list_index,
+                None,
+            );
+        }
+        NodeValue::TaskItem(marker) => {
+            // None = unchecked `[ ]`；Some(c) = checked（通常为 x/X）
+            let checked = match marker {
+                Some(_) => Some(true),
+                None => Some(false),
             };
-            let est = estimate_height(&kind, &inlines, depth);
-            let line = data.sourcepos.start.line;
-            blocks.push(RenderBlock {
-                kind,
-                inlines,
-                depth: depth.saturating_add(if in_blockquote { 1 } else { 0 }),
-                est_height: est,
-                source_line: line,
-            });
-            for n in nested {
-                flatten(
-                    n,
-                    depth + 1,
-                    blocks,
-                    outline,
-                    in_blockquote,
-                    true,
-                    list_start,
-                    0,
-                );
-            }
+            push_list_item(
+                node,
+                depth,
+                blocks,
+                outline,
+                in_blockquote,
+                list_start,
+                list_index,
+                checked,
+            );
         }
         NodeValue::Heading(h) => {
             let mut inlines = Vec::new();
@@ -243,6 +252,48 @@ fn flatten<'a>(
                 source_line: data.sourcepos.start.line,
             });
         }
+        NodeValue::Table(_) => {
+            let mut headers: Vec<Vec<InlineSpan>> = Vec::new();
+            let mut rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+            for row_node in node.children() {
+                let is_header = matches!(
+                    row_node.data.borrow().value,
+                    NodeValue::TableRow(true)
+                );
+                if !matches!(
+                    row_node.data.borrow().value,
+                    NodeValue::TableRow(_)
+                ) {
+                    continue;
+                }
+                let mut cells = Vec::new();
+                for cell in row_node.children() {
+                    let mut inlines = Vec::new();
+                    collect_inlines(cell, &mut inlines);
+                    cells.push(inlines);
+                }
+                if is_header && headers.is_empty() {
+                    headers = cells;
+                } else {
+                    rows.push(cells);
+                }
+            }
+            let kind = RenderKind::Table {
+                headers: headers.clone(),
+                rows: rows.clone(),
+            };
+            let est = estimate_height(&kind, &[], depth);
+            blocks.push(RenderBlock {
+                kind,
+                inlines: vec![],
+                depth,
+                est_height: est,
+                source_line: data.sourcepos.start.line,
+            });
+        }
+        NodeValue::TableRow(_) | NodeValue::TableCell => {
+            // handled under Table
+        }
         _ => {
             for c in node.children() {
                 flatten(c, depth, blocks, outline, in_blockquote, false, 1, 0);
@@ -251,8 +302,72 @@ fn flatten<'a>(
     }
 }
 
+fn push_list_item<'a>(
+    node: &'a AstNode<'a>,
+    depth: u16,
+    blocks: &mut Vec<RenderBlock>,
+    outline: &mut Vec<HeadingOutline>,
+    in_blockquote: bool,
+    list_start: u32,
+    list_index: u32,
+    checked: Option<bool>,
+) {
+    let data = node.data.borrow();
+    let mut inlines = Vec::new();
+    let mut nested = Vec::new();
+    for c in node.children() {
+        match &c.data.borrow().value {
+            NodeValue::Paragraph | NodeValue::Heading(_) => {
+                collect_inlines(c, &mut inlines);
+            }
+            NodeValue::List(_)
+            | NodeValue::BlockQuote
+            | NodeValue::CodeBlock(_)
+            | NodeValue::Table(_) => {
+                nested.push(c);
+            }
+            _ => {
+                collect_inlines(c, &mut inlines);
+            }
+        }
+    }
+    let ordered = node
+        .parent()
+        .and_then(|p| match &p.data.borrow().value {
+            NodeValue::List(l) => Some(matches!(l.list_type, ListType::Ordered)),
+            _ => None,
+        })
+        .unwrap_or(false);
+    let kind = RenderKind::ListItem {
+        ordered,
+        start: list_start,
+        index: list_index,
+        checked,
+    };
+    let est = estimate_height(&kind, &inlines, depth);
+    blocks.push(RenderBlock {
+        kind,
+        inlines,
+        depth: depth.saturating_add(if in_blockquote { 1 } else { 0 }),
+        est_height: est,
+        source_line: data.sourcepos.start.line,
+    });
+    for n in nested {
+        flatten(
+            n,
+            depth + 1,
+            blocks,
+            outline,
+            in_blockquote,
+            true,
+            list_start,
+            0,
+        );
+    }
+}
+
 fn collect_inlines<'a>(node: &'a AstNode<'a>, out: &mut Vec<InlineSpan>) {
-    collect_inlines_styled(node, out, false, false);
+    collect_inlines_styled(node, out, false, false, false);
 }
 
 fn collect_inlines_styled<'a>(
@@ -260,6 +375,7 @@ fn collect_inlines_styled<'a>(
     out: &mut Vec<InlineSpan>,
     strong: bool,
     emphasis: bool,
+    strikethrough: bool,
 ) {
     match &node.data.borrow().value {
         NodeValue::Text(t) => {
@@ -268,6 +384,7 @@ fn collect_inlines_styled<'a>(
                 strong,
                 emphasis,
                 code: false,
+                strikethrough,
                 link_url: None,
                 image_src: None,
                 soft_break: false,
@@ -280,6 +397,7 @@ fn collect_inlines_styled<'a>(
                 strong,
                 emphasis,
                 code: true,
+                strikethrough,
                 link_url: None,
                 image_src: None,
                 soft_break: false,
@@ -292,6 +410,7 @@ fn collect_inlines_styled<'a>(
                 strong,
                 emphasis,
                 code: false,
+                strikethrough,
                 link_url: None,
                 image_src: None,
                 soft_break: true,
@@ -304,6 +423,7 @@ fn collect_inlines_styled<'a>(
                 strong,
                 emphasis,
                 code: false,
+                strikethrough,
                 link_url: None,
                 image_src: None,
                 soft_break: false,
@@ -312,19 +432,24 @@ fn collect_inlines_styled<'a>(
         }
         NodeValue::Strong => {
             for c in node.children() {
-                collect_inlines_styled(c, out, true, emphasis);
+                collect_inlines_styled(c, out, true, emphasis, strikethrough);
             }
         }
         NodeValue::Emph => {
             for c in node.children() {
-                collect_inlines_styled(c, out, strong, true);
+                collect_inlines_styled(c, out, strong, true, strikethrough);
+            }
+        }
+        NodeValue::Strikethrough => {
+            for c in node.children() {
+                collect_inlines_styled(c, out, strong, emphasis, true);
             }
         }
         NodeValue::Link(link) => {
             let url = link.url.clone();
             let mut children = Vec::new();
             for c in node.children() {
-                collect_inlines_styled(c, &mut children, strong, emphasis);
+                collect_inlines_styled(c, &mut children, strong, emphasis, strikethrough);
             }
             if children.is_empty() {
                 out.push(InlineSpan {
@@ -332,6 +457,7 @@ fn collect_inlines_styled<'a>(
                     strong,
                     emphasis,
                     code: false,
+                    strikethrough,
                     link_url: Some(url),
                     image_src: None,
                     soft_break: false,
@@ -349,7 +475,7 @@ fn collect_inlines_styled<'a>(
             let mut alt = String::new();
             for c in node.children() {
                 let mut tmp = Vec::new();
-                collect_inlines_styled(c, &mut tmp, false, false);
+                collect_inlines_styled(c, &mut tmp, false, false, false);
                 for t in tmp {
                     alt.push_str(&t.text);
                 }
@@ -363,6 +489,7 @@ fn collect_inlines_styled<'a>(
                 strong,
                 emphasis,
                 code: false,
+                strikethrough,
                 link_url: None,
                 image_src: Some(url),
                 soft_break: false,
@@ -375,6 +502,7 @@ fn collect_inlines_styled<'a>(
                 strong,
                 emphasis,
                 code: true,
+                strikethrough,
                 link_url: None,
                 image_src: None,
                 soft_break: false,
@@ -383,7 +511,7 @@ fn collect_inlines_styled<'a>(
         }
         _ => {
             for c in node.children() {
-                collect_inlines_styled(c, out, strong, emphasis);
+                collect_inlines_styled(c, out, strong, emphasis, strikethrough);
             }
         }
     }
@@ -405,7 +533,8 @@ fn estimate_height(kind: &RenderKind, inlines: &[InlineSpan], depth: u16) -> f32
         RenderKind::ThematicBreak => 20.0,
         RenderKind::HtmlBlock { literal } => 12.0 + literal.lines().count().max(1) as f32 * 14.0,
         RenderKind::ListItem { .. } => 8.0 + lines * 18.0,
-        RenderKind::Paragraph | RenderKind::BlockQuote => 8.0 + lines * 18.0,
+        RenderKind::Paragraph | RenderKind::BlockQuote => 8.0 + lines * 28.0,
+        RenderKind::Table { headers: _, rows } => 28.0 + (rows.len() + 1) as f32 * 24.0,
         RenderKind::ExtensionStub { .. } => 24.0,
     };
     base + depth as f32 * 2.0

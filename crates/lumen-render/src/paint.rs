@@ -5,17 +5,22 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{
-    self, text::LayoutJob, Color32, FontId, Galley, RichText, ScrollArea, Sense, TextFormat, Ui,
-    Vec2,
+    self, text::LayoutJob, Color32, FontId, Frame, Galley, Margin, RichText, ScrollArea, Sense,
+    Stroke, TextFormat, Ui, Vec2,
 };
 use lumen_core::Dialect;
 
 use crate::model::{InlineSpan, RenderBlock, RenderKind, RenderModel};
 use crate::serialize::{
-    apply_inline_format, plain_text, plain_to_inlines, set_block_kind, InlineFormat,
+    apply_inline_format, inlines_to_md, parse_inlines_md, plain_text, plain_to_inlines,
+    set_block_kind, InlineFormat,
 };
 
 const DEBOUNCE: Duration = Duration::from_millis(80);
+const BODY_SIZE: f32 = 17.0;
+const BODY_LINE: f32 = 1.7;
+const READ_MAX_W: f32 = 820.0;
+const TEAL: Color32 = Color32::from_rgb(0x0D, 0x7A, 0x6F);
 
 pub struct PreviewState {
     pub dialect: Dialect,
@@ -30,12 +35,20 @@ pub struct PreviewState {
     image_fail: HashMap<String, bool>,
     workspace_root: Option<PathBuf>,
     pub selected: Option<usize>,
-    /// 选中块正在编辑的纯文本
+    /// 选中块正在编辑的文本（行内块为 markdown）
     edit_buf: String,
+    /// 代码块语言行
+    code_info_buf: String,
+    /// 表格单元格编辑：(block_idx, row, col)；row=0 为表头
+    editing_cell: Option<(usize, usize, usize)>,
     /// 外部应读取：编辑产生了新的 markdown
     pub pending_markdown: Option<String>,
     link_dialog: bool,
+    link_text_buf: String,
     link_url_buf: String,
+    image_dialog: bool,
+    image_alt_buf: String,
+    image_path_buf: String,
 }
 
 impl Default for PreviewState {
@@ -53,9 +66,15 @@ impl Default for PreviewState {
             workspace_root: None,
             selected: None,
             edit_buf: String::new(),
+            code_info_buf: String::new(),
+            editing_cell: None,
             pending_markdown: None,
             link_dialog: false,
+            link_text_buf: String::new(),
             link_url_buf: String::new(),
+            image_dialog: false,
+            image_alt_buf: String::new(),
+            image_path_buf: String::new(),
         }
     }
 }
@@ -70,10 +89,6 @@ impl PreviewState {
         if source != self.pending_src {
             self.pending_src = source.to_string();
             self.last_edit = Instant::now();
-            // 外部源码变更时清除选中，避免错位
-            if self.selected.is_none() {
-                // keep
-            }
         }
     }
 
@@ -105,40 +120,85 @@ impl PreviewState {
 
     pub fn select_block(&mut self, idx: usize) {
         self.commit_edit_buf();
-        if let Some(m) = &self.model {
-            if idx < m.blocks.len() {
-                self.selected = Some(idx);
-                self.edit_buf = block_edit_text(&m.blocks[idx]);
-            }
+        self.editing_cell = None;
+        let bufs = self
+            .model
+            .as_ref()
+            .and_then(|m| m.blocks.get(idx))
+            .map(edit_bufs_from_block);
+        if let Some((edit, info)) = bufs {
+            self.selected = Some(idx);
+            self.edit_buf = edit;
+            self.code_info_buf = info;
         }
     }
 
     pub fn clear_selection(&mut self) {
         self.commit_edit_buf();
         self.selected = None;
+        self.editing_cell = None;
         self.edit_buf.clear();
+        self.code_info_buf.clear();
     }
 
     fn commit_edit_buf(&mut self) {
+        // 表格单元格提交
+        if let Some((bi, row, col)) = self.editing_cell {
+            let dialect = self.dialect;
+            let text = self.edit_buf.clone();
+            let Some(model) = self.model.as_mut() else { return };
+            if bi >= model.blocks.len() {
+                return;
+            }
+            if let RenderKind::Table { headers, rows } = &mut model.blocks[bi].kind {
+                let spans = if text.contains(['*', '`', '~', '[', '!']) {
+                    parse_inlines_md(&text, dialect)
+                } else {
+                    plain_to_inlines(&text)
+                };
+                if row == 0 {
+                    if col < headers.len() {
+                        headers[col] = spans;
+                    }
+                } else {
+                    let ri = row - 1;
+                    if ri < rows.len() && col < rows[ri].len() {
+                        rows[ri][col] = spans;
+                    }
+                }
+                self.editing_cell = None;
+                self.emit_md();
+            }
+            return;
+        }
+
         let Some(idx) = self.selected else { return };
+        let dialect = self.dialect;
         let Some(model) = self.model.as_mut() else { return };
         if idx >= model.blocks.len() {
             return;
         }
         let block = &mut model.blocks[idx];
         match &mut block.kind {
-            RenderKind::CodeBlock { literal, .. } => {
+            RenderKind::CodeBlock { info, literal } => {
+                let mut changed = false;
                 if *literal != self.edit_buf {
                     *literal = self.edit_buf.clone();
+                    changed = true;
+                }
+                if *info != self.code_info_buf {
+                    *info = self.code_info_buf.clone();
+                    changed = true;
+                }
+                if changed {
                     self.emit_md();
                 }
             }
-            RenderKind::ThematicBreak | RenderKind::HtmlBlock { .. } => {}
+            RenderKind::ThematicBreak | RenderKind::HtmlBlock { .. } | RenderKind::Table { .. } => {}
             _ => {
-                let old = plain_text(&block.inlines);
-                if old != self.edit_buf {
-                    // 保留简单格式若仅空白变化；否则用纯文本
-                    block.inlines = plain_to_inlines(&self.edit_buf);
+                let old_md = inlines_to_md(&block.inlines);
+                if old_md != self.edit_buf {
+                    block.inlines = parse_inlines_md(&self.edit_buf, dialect);
                     self.emit_md();
                 }
             }
@@ -150,7 +210,6 @@ impl PreviewState {
             let md = m.to_markdown();
             self.pending_src = md.clone();
             self.pending_markdown = Some(md);
-            // 更新指纹避免立即被 debounce 覆盖
             self.last_edit = Instant::now();
         }
     }
@@ -163,7 +222,9 @@ impl PreviewState {
             return;
         }
         set_block_kind(&mut model.blocks[idx], kind);
-        self.edit_buf = block_edit_text(&model.blocks[idx]);
+        let bufs = edit_bufs_from_block(&model.blocks[idx]);
+        self.edit_buf = bufs.0;
+        self.code_info_buf = bufs.1;
         self.emit_md();
         self.force_rebuild_keep_sel(idx);
     }
@@ -176,7 +237,9 @@ impl PreviewState {
             return;
         }
         apply_inline_format(&mut model.blocks[idx].inlines, fmt);
-        self.edit_buf = block_edit_text(&model.blocks[idx]);
+        let bufs = edit_bufs_from_block(&model.blocks[idx]);
+        self.edit_buf = bufs.0;
+        self.code_info_buf = bufs.1;
         self.emit_md();
         self.force_rebuild_keep_sel(idx);
     }
@@ -235,29 +298,276 @@ impl PreviewState {
         self.force_rebuild_keep_sel(idx);
     }
 
+    pub fn cmd_insert_table(&mut self, cols: usize, rows: usize) {
+        self.commit_edit_buf();
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let empty = || vec![InlineSpan::plain("")];
+        let headers: Vec<Vec<InlineSpan>> = (0..cols)
+            .map(|i| vec![InlineSpan::plain(format!("列{}", i + 1))])
+            .collect();
+        let data: Vec<Vec<Vec<InlineSpan>>> = (0..rows)
+            .map(|_| (0..cols).map(|_| empty()).collect())
+            .collect();
+        let kind = RenderKind::Table {
+            headers: headers.clone(),
+            rows: data.clone(),
+        };
+        let est = 28.0 + (rows + 1) as f32 * 24.0;
+        let block = RenderBlock {
+            kind,
+            inlines: vec![],
+            depth: 0,
+            est_height: est,
+            source_line: 0,
+        };
+        let Some(model) = self.model.as_mut() else {
+            let mut m = RenderModel::build("", self.dialect);
+            m.blocks.push(block);
+            self.model = Some(m);
+            self.selected = Some(0);
+            self.emit_md();
+            return;
+        };
+        let idx = self.selected.map(|i| i + 1).unwrap_or(model.blocks.len());
+        model.blocks.insert(idx, block);
+        self.selected = Some(idx);
+        self.emit_md();
+        self.force_rebuild_keep_sel(idx);
+    }
+
+    pub fn cmd_insert_image(&mut self, alt: &str, path: &str) {
+        self.commit_edit_buf();
+        let mut sp = InlineSpan::plain(if alt.is_empty() { "图片" } else { alt });
+        sp.image_src = Some(path.to_string());
+        let Some(model) = self.model.as_mut() else {
+            let mut m = RenderModel::build("", self.dialect);
+            m.blocks.push(RenderBlock {
+                kind: RenderKind::Paragraph,
+                inlines: vec![sp],
+                depth: 0,
+                est_height: 40.0,
+                source_line: 0,
+            });
+            self.model = Some(m);
+            self.selected = Some(0);
+            self.emit_md();
+            return;
+        };
+        if let Some(idx) = self.selected {
+            if idx < model.blocks.len() {
+                model.blocks[idx].inlines.push(sp);
+                let bufs = edit_bufs_from_block(&model.blocks[idx]);
+                self.edit_buf = bufs.0;
+                self.code_info_buf = bufs.1;
+                self.emit_md();
+                self.force_rebuild_keep_sel(idx);
+                return;
+            }
+        }
+        let idx = model.blocks.len();
+        model.blocks.push(RenderBlock {
+            kind: RenderKind::Paragraph,
+            inlines: vec![sp],
+            depth: 0,
+            est_height: 40.0,
+            source_line: 0,
+        });
+        self.selected = Some(idx);
+        self.emit_md();
+        self.force_rebuild_keep_sel(idx);
+    }
+
+    pub fn cmd_insert_code_block(&mut self) {
+        self.commit_edit_buf();
+        let block = RenderBlock {
+            kind: RenderKind::CodeBlock {
+                info: String::new(),
+                literal: String::new(),
+            },
+            inlines: vec![],
+            depth: 0,
+            est_height: 48.0,
+            source_line: 0,
+        };
+        let Some(model) = self.model.as_mut() else {
+            let mut m = RenderModel::build("", self.dialect);
+            m.blocks.push(block);
+            self.model = Some(m);
+            self.selected = Some(0);
+            self.code_info_buf.clear();
+            self.edit_buf.clear();
+            self.emit_md();
+            return;
+        };
+        let idx = self.selected.map(|i| i + 1).unwrap_or(model.blocks.len());
+        model.blocks.insert(idx, block);
+        self.selected = Some(idx);
+        self.code_info_buf.clear();
+        self.edit_buf.clear();
+        self.emit_md();
+        self.force_rebuild_keep_sel(idx);
+    }
+
+    pub fn cmd_toggle_task(&mut self) {
+        self.commit_edit_buf();
+        let Some(idx) = self.selected else {
+            // 无选中时插入新任务项
+            let block = RenderBlock {
+                kind: RenderKind::ListItem {
+                    ordered: false,
+                    start: 1,
+                    index: 0,
+                    checked: Some(false),
+                },
+                inlines: plain_to_inlines("任务"),
+                depth: 1,
+                est_height: 28.0,
+                source_line: 0,
+            };
+            let Some(model) = self.model.as_mut() else {
+                let mut m = RenderModel::build("", self.dialect);
+                m.blocks.push(block);
+                self.model = Some(m);
+                self.selected = Some(0);
+                self.emit_md();
+                return;
+            };
+            let i = model.blocks.len();
+            model.blocks.push(block);
+            self.selected = Some(i);
+            self.emit_md();
+            self.force_rebuild_keep_sel(i);
+            return;
+        };
+        let Some(model) = self.model.as_mut() else { return };
+        if idx >= model.blocks.len() {
+            return;
+        }
+        match &mut model.blocks[idx].kind {
+            RenderKind::ListItem { checked, .. } => {
+                *checked = match *checked {
+                    Some(true) => Some(false),
+                    Some(false) => Some(true),
+                    None => Some(false),
+                };
+            }
+            _ => {
+                set_block_kind(
+                    &mut model.blocks[idx],
+                    RenderKind::ListItem {
+                        ordered: false,
+                        start: 1,
+                        index: 0,
+                        checked: Some(false),
+                    },
+                );
+            }
+        }
+        let bufs = edit_bufs_from_block(&model.blocks[idx]);
+        self.edit_buf = bufs.0;
+        self.code_info_buf = bufs.1;
+        self.emit_md();
+        self.force_rebuild_keep_sel(idx);
+    }
+
+    pub fn cmd_table_add_row(&mut self) {
+        self.commit_edit_buf();
+        let Some(idx) = self.selected else { return };
+        let Some(model) = self.model.as_mut() else { return };
+        if let RenderKind::Table { headers, rows } = &mut model.blocks[idx].kind {
+            let cols = headers.len().max(1);
+            rows.push((0..cols).map(|_| vec![InlineSpan::plain("")]).collect());
+            self.emit_md();
+            self.force_rebuild_keep_sel(idx);
+        }
+    }
+
+    pub fn cmd_table_remove_row(&mut self) {
+        self.commit_edit_buf();
+        let Some(idx) = self.selected else { return };
+        let Some(model) = self.model.as_mut() else { return };
+        if let RenderKind::Table { rows, .. } = &mut model.blocks[idx].kind {
+            if !rows.is_empty() {
+                rows.pop();
+                self.emit_md();
+                self.force_rebuild_keep_sel(idx);
+            }
+        }
+    }
+
+    pub fn cmd_table_add_col(&mut self) {
+        self.commit_edit_buf();
+        let Some(idx) = self.selected else { return };
+        let Some(model) = self.model.as_mut() else { return };
+        if let RenderKind::Table { headers, rows } = &mut model.blocks[idx].kind {
+            headers.push(vec![InlineSpan::plain("")]);
+            for row in rows.iter_mut() {
+                row.push(vec![InlineSpan::plain("")]);
+            }
+            self.emit_md();
+            self.force_rebuild_keep_sel(idx);
+        }
+    }
+
+    pub fn cmd_table_remove_col(&mut self) {
+        self.commit_edit_buf();
+        let Some(idx) = self.selected else { return };
+        let Some(model) = self.model.as_mut() else { return };
+        if let RenderKind::Table { headers, rows } = &mut model.blocks[idx].kind {
+            if headers.len() > 1 {
+                headers.pop();
+                for row in rows.iter_mut() {
+                    if row.len() > headers.len() {
+                        row.pop();
+                    }
+                }
+                self.emit_md();
+                self.force_rebuild_keep_sel(idx);
+            }
+        }
+    }
+
     fn force_rebuild_keep_sel(&mut self, idx: usize) {
-        // 从当前 model 序列化后再 parse，保证与 comrak 一致
         if let Some(md) = self.pending_markdown.clone() {
             self.model = Some(RenderModel::build(&md, self.dialect));
             self.pending_src = md;
             if idx < self.model.as_ref().map(|m| m.blocks.len()).unwrap_or(0) {
                 self.selected = Some(idx);
-                if let Some(m) = &self.model {
-                    self.edit_buf = block_edit_text(&m.blocks[idx]);
+                if let Some(bufs) = self
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.blocks.get(idx))
+                    .map(edit_bufs_from_block)
+                {
+                    self.edit_buf = bufs.0;
+                    self.code_info_buf = bufs.1;
                 }
             }
         }
     }
 
     pub fn open_link_dialog(&mut self) {
+        self.link_text_buf.clear();
+        if let Some(idx) = self.selected {
+            if let Some(m) = &self.model {
+                if idx < m.blocks.len() {
+                    self.link_text_buf = plain_text(&m.blocks[idx].inlines);
+                }
+            }
+        }
         self.link_url_buf.clear();
         self.link_dialog = true;
     }
 
+    pub fn open_image_dialog(&mut self) {
+        self.image_alt_buf.clear();
+        self.image_path_buf.clear();
+        self.image_dialog = true;
+    }
+
     fn ensure_model(&mut self) {
-        // 有未提交选中编辑时不要用旧 pending 覆盖
         if self.selected.is_some() && self.pending_markdown.is_none() {
-            // 仍允许首次构建
             if self.model.is_some() {
                 return;
             }
@@ -274,25 +584,38 @@ impl PreviewState {
             self.model = Some(RenderModel::build(&self.pending_src, self.dialect));
             self.galley_width = 0.0;
             if let Some(idx) = sel {
-                if let Some(m) = &self.model {
-                    if idx < m.blocks.len() {
-                        self.selected = Some(idx);
-                        self.edit_buf = block_edit_text(&m.blocks[idx]);
-                    } else {
-                        self.selected = None;
-                    }
+                let bufs = self
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.blocks.get(idx))
+                    .map(edit_bufs_from_block);
+                if let Some((edit, info)) = bufs {
+                    self.selected = Some(idx);
+                    self.edit_buf = edit;
+                    self.code_info_buf = info;
+                } else {
+                    self.selected = None;
                 }
             }
         }
     }
 }
 
+fn edit_bufs_from_block(block: &RenderBlock) -> (String, String) {
+    let edit = block_edit_text(block);
+    let info = match &block.kind {
+        RenderKind::CodeBlock { info, .. } => info.clone(),
+        _ => String::new(),
+    };
+    (edit, info)
+}
+
 fn block_edit_text(b: &RenderBlock) -> String {
     match &b.kind {
         RenderKind::CodeBlock { literal, .. } => literal.clone(),
         RenderKind::HtmlBlock { literal } => literal.clone(),
-        RenderKind::ThematicBreak => String::new(),
-        _ => plain_text(&b.inlines),
+        RenderKind::ThematicBreak | RenderKind::Table { .. } => String::new(),
+        _ => inlines_to_md(&b.inlines),
     }
 }
 
@@ -306,17 +629,66 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
             .collapsible(false)
             .resizable(false)
             .show(ui.ctx(), |ui| {
+                ui.label("文本");
+                ui.text_edit_singleline(&mut state.link_text_buf);
                 ui.label("URL");
                 ui.text_edit_singleline(&mut state.link_url_buf);
                 ui.horizontal(|ui| {
                     if ui.button("确定").clicked() {
                         let url = state.link_url_buf.clone();
+                        let text = state.link_text_buf.clone();
                         state.link_dialog = false;
-                        state.cmd_inline(InlineFormat::Link(url));
-                        dirty = true;
+                        if let Some(idx) = state.selected {
+                            if let Some(model) = state.model.as_mut() {
+                                if idx < model.blocks.len() {
+                                    let mut sp = InlineSpan::plain(if text.is_empty() {
+                                        url.clone()
+                                    } else {
+                                        text
+                                    });
+                                    sp.link_url = Some(url);
+                                    model.blocks[idx].inlines = vec![sp];
+                                    let bufs = edit_bufs_from_block(&model.blocks[idx]);
+                                    state.edit_buf = bufs.0;
+                                    state.code_info_buf = bufs.1;
+                                    state.emit_md();
+                                    state.force_rebuild_keep_sel(idx);
+                                    dirty = true;
+                                }
+                            }
+                        } else {
+                            state.cmd_inline(InlineFormat::Link(url));
+                            dirty = true;
+                        }
                     }
                     if ui.button("取消").clicked() {
                         state.link_dialog = false;
+                    }
+                });
+            });
+    }
+
+    if state.image_dialog {
+        egui::Window::new("插入图片")
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.label("替代文本");
+                ui.text_edit_singleline(&mut state.image_alt_buf);
+                ui.label("相对路径");
+                ui.text_edit_singleline(&mut state.image_path_buf);
+                ui.horizontal(|ui| {
+                    if ui.button("确定").clicked() {
+                        let alt = state.image_alt_buf.clone();
+                        let path = state.image_path_buf.clone();
+                        state.image_dialog = false;
+                        if !path.is_empty() {
+                            state.cmd_insert_image(&alt, &path);
+                            dirty = true;
+                        }
+                    }
+                    if ui.button("取消").clicked() {
+                        state.image_dialog = false;
                     }
                 });
             });
@@ -339,7 +711,9 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
         return false;
     };
 
-    let content_w = (width - 16.0).max(120.0);
+    // 居中阅读栏 ≈820
+    let content_w = (width - 16.0).min(READ_MAX_W).max(120.0);
+    let side_pad = ((width - content_w) * 0.5).max(0.0);
     state.galley_width = content_w;
 
     let mut scroll = ScrollArea::vertical()
@@ -353,8 +727,12 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
 
     let mut clicked: Option<usize> = None;
     let mut edit_changed = false;
+    let mut cell_click: Option<(usize, usize, usize)> = None;
+    let mut toggle_task_idx: Option<usize> = None;
+    let mut measured: Vec<(usize, f32)> = Vec::new();
 
     scroll.show_viewport(ui, |ui, viewport| {
+        ui.add_space(side_pad);
         ui.set_width(content_w);
         let pad = viewport.height().max(200.0);
         let y0 = (viewport.top() - pad).max(0.0);
@@ -375,7 +753,8 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
 
         let mut drawn_h = 0.0_f32;
         for (i, block) in model.blocks.iter().enumerate().skip(start_i) {
-            if y + drawn_h > y1 && state.selected != Some(i) {
+            if y + drawn_h > y1 && state.selected != Some(i) && state.editing_cell.map(|(b, _, _)| b) != Some(i)
+            {
                 let rest: f32 = model.blocks[i..].iter().map(|b| b.est_height).sum();
                 ui.allocate_exact_size(Vec2::new(content_w, rest), Sense::hover());
                 break;
@@ -384,30 +763,68 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
             let before = ui.cursor().top();
 
             ui.horizontal(|ui| {
-                let bar_w = 3.0;
-                let (bar, _) = ui.allocate_exact_size(
-                    Vec2::new(bar_w, block.est_height.max(22.0)),
-                    Sense::hover(),
-                );
-                if selected {
-                    ui.painter().rect_filled(
-                        bar,
-                        1.0,
-                        Color32::from_rgb(0x0D, 0x7A, 0x6F),
-                    );
-                }
-                ui.add_space(8.0);
+                // 选中条 + 引用竖条
+                let quote_depth = if matches!(block.kind, RenderKind::BlockQuote)
+                    || (block.depth > 0
+                        && matches!(
+                            block.kind,
+                            RenderKind::Paragraph | RenderKind::Heading { .. }
+                        ))
+                {
+                    block.depth.max(1)
+                } else if block.depth > 0
+                    && !matches!(
+                        block.kind,
+                        RenderKind::ListItem { .. } | RenderKind::CodeBlock { .. }
+                    )
+                {
+                    // depth 可能来自 blockquote
+                    1u16
+                } else {
+                    0u16
+                };
 
-                let avail = (content_w - 20.0).max(80.0);
+                let bar_w = if selected { 3.0 } else { 0.0 };
+                if selected {
+                    let (bar, _) = ui.allocate_exact_size(
+                        Vec2::new(bar_w, block.est_height.max(22.0)),
+                        Sense::hover(),
+                    );
+                    ui.painter().rect_filled(bar, 1.0, TEAL);
+                }
+                if quote_depth > 0 {
+                    for _ in 0..quote_depth.min(3) {
+                        let (qbar, _) = ui.allocate_exact_size(
+                            Vec2::new(3.0, block.est_height.max(22.0)),
+                            Sense::hover(),
+                        );
+                        ui.painter().rect_filled(qbar, 0.0, TEAL);
+                        ui.add_space(6.0);
+                    }
+                } else {
+                    ui.add_space(8.0);
+                }
+
+                let avail = (content_w - 28.0).max(80.0);
                 ui.vertical(|ui| {
                     ui.set_max_width(avail);
-                    if state.editable && selected {
-                        if paint_block_editor(ui, state, block, &mut edit_changed) {
-                            // editing
-                        }
+                    if state.editable && selected && !matches!(block.kind, RenderKind::Table { .. })
+                    {
+                        paint_block_editor(ui, state, block, &mut edit_changed);
+                    } else if matches!(block.kind, RenderKind::Table { .. }) {
+                        paint_table(
+                            ui,
+                            state,
+                            i,
+                            block,
+                            avail,
+                            &mut cell_click,
+                            &mut clicked,
+                            &mut edit_changed,
+                        );
                     } else {
                         let resp = ui.allocate_ui(Vec2::new(avail, 0.0), |ui| {
-                            paint_block_view(ui, state, block, avail);
+                            paint_block_view(ui, state, i, block, avail, &mut toggle_task_idx);
                         });
                         if state.editable && resp.response.clicked() {
                             clicked = Some(i);
@@ -417,9 +834,55 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
             });
 
             let after = ui.cursor().top();
-            drawn_h += (after - before).max(block.est_height * 0.5);
+            let measured_h = (after - before).max(block.est_height * 0.5);
+            measured.push((i, measured_h));
+            drawn_h += measured_h;
         }
     });
+
+    // 用实测高度更新虚拟化估计
+    if let Some(m) = state.model.as_mut() {
+        let mut changed = false;
+        for (i, h) in measured {
+            if i < m.blocks.len() && (m.blocks[i].est_height - h).abs() > 2.0 {
+                m.blocks[i].est_height = h;
+                changed = true;
+            }
+        }
+        if changed {
+            m.recompute_total_height();
+        }
+    }
+
+    if let Some(i) = toggle_task_idx {
+        if let Some(m) = state.model.as_mut() {
+            if let RenderKind::ListItem { checked, .. } = &mut m.blocks[i].kind {
+                *checked = Some(!checked.unwrap_or(false));
+                state.emit_md();
+                dirty = true;
+            }
+        }
+    }
+
+    if let Some((bi, row, col)) = cell_click {
+        state.commit_edit_buf();
+        state.selected = Some(bi);
+        state.editing_cell = Some((bi, row, col));
+        if let Some(m) = &state.model {
+            if let RenderKind::Table { headers, rows } = &m.blocks[bi].kind {
+                let spans = if row == 0 {
+                    headers.get(col).cloned().unwrap_or_default()
+                } else {
+                    rows.get(row - 1)
+                        .and_then(|r| r.get(col))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                state.edit_buf = plain_text(&spans);
+            }
+        }
+        dirty = true;
+    }
 
     if let Some(i) = clicked {
         state.select_block(i);
@@ -433,26 +896,36 @@ pub fn show_preview(ui: &mut Ui, state: &mut PreviewState) -> bool {
     dirty
 }
 
-fn paint_block_editor(ui: &mut Ui, state: &mut PreviewState, block: &RenderBlock, changed: &mut bool) -> bool {
+fn paint_block_editor(
+    ui: &mut Ui,
+    state: &mut PreviewState,
+    block: &RenderBlock,
+    changed: &mut bool,
+) -> bool {
     match &block.kind {
         RenderKind::ThematicBreak => {
             ui.separator();
             ui.label(RichText::new("分隔线").small().color(Color32::GRAY));
         }
-        RenderKind::CodeBlock { info, .. } => {
-            if !info.is_empty() {
-                ui.label(RichText::new(info).small().color(Color32::GRAY));
-            }
+        RenderKind::CodeBlock { .. } => {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("语言").small().color(Color32::GRAY));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.code_info_buf)
+                        .desired_width(120.0)
+                        .hint_text("rust"),
+                );
+                if resp.changed() || resp.lost_focus() {
+                    *changed = true;
+                }
+            });
             let resp = ui.add(
                 egui::TextEdit::multiline(&mut state.edit_buf)
                     .desired_width(f32::INFINITY)
                     .font(FontId::monospace(13.0))
                     .code_editor(),
             );
-            if resp.changed() {
-                *changed = true;
-            }
-            if resp.lost_focus() {
+            if resp.changed() || resp.lost_focus() {
                 *changed = true;
             }
         }
@@ -473,7 +946,7 @@ fn paint_block_editor(ui: &mut Ui, state: &mut PreviewState, block: &RenderBlock
                 egui::TextEdit::multiline(&mut state.edit_buf)
                     .desired_width(f32::INFINITY)
                     .desired_rows(2)
-                    .font(FontId::proportional(14.5)),
+                    .font(FontId::proportional(BODY_SIZE)),
             );
             if resp.changed() || resp.lost_focus() {
                 *changed = true;
@@ -493,8 +966,18 @@ fn heading_size(level: u8) -> f32 {
     }
 }
 
-fn paint_block_view(ui: &mut Ui, state: &mut PreviewState, block: &RenderBlock, width: f32) {
-    let indent = block.depth as f32 * 12.0;
+fn paint_block_view(
+    ui: &mut Ui,
+    state: &mut PreviewState,
+    block_idx: usize,
+    block: &RenderBlock,
+    width: f32,
+    toggle_task: &mut Option<usize>,
+) {
+    let indent = match &block.kind {
+        RenderKind::ListItem { .. } => block.depth.saturating_sub(1) as f32 * 12.0,
+        _ => 0.0,
+    };
     if indent > 0.0 {
         ui.add_space(indent);
     }
@@ -508,28 +991,35 @@ fn paint_block_view(ui: &mut Ui, state: &mut PreviewState, block: &RenderBlock, 
             ui.add_space(6.0);
         }
         RenderKind::Paragraph | RenderKind::BlockQuote => {
-            paint_inlines(ui, state, &block.inlines, 14.5, false);
-            ui.add_space(8.0);
+            paint_inlines(ui, state, &block.inlines, BODY_SIZE, false);
+            ui.add_space(BODY_SIZE * (BODY_LINE - 1.0));
         }
         RenderKind::ListItem {
             ordered,
             start,
             index,
+            checked,
         } => {
-            let bullet = if *ordered {
-                format!("{}.", start + index)
-            } else {
-                "•".into()
-            };
             ui.horizontal_top(|ui| {
-                ui.label(
-                    RichText::new(bullet)
-                        .strong()
-                        .color(Color32::from_rgb(0x0D, 0x7A, 0x6F)),
-                );
+                if let Some(is_checked) = checked {
+                    let label = if *is_checked { "☑" } else { "☐" };
+                    if ui
+                        .add(egui::Button::new(RichText::new(label).size(BODY_SIZE)).frame(false))
+                        .clicked()
+                    {
+                        *toggle_task = Some(block_idx);
+                    }
+                } else {
+                    let bullet = if *ordered {
+                        format!("{}.", start + index)
+                    } else {
+                        "•".into()
+                    };
+                    ui.label(RichText::new(bullet).strong().color(TEAL));
+                }
                 ui.add_space(6.0);
                 ui.vertical(|ui| {
-                    paint_inlines(ui, state, &block.inlines, 14.5, false);
+                    paint_inlines(ui, state, &block.inlines, BODY_SIZE, false);
                 });
             });
             ui.add_space(4.0);
@@ -538,7 +1028,7 @@ fn paint_block_view(ui: &mut Ui, state: &mut PreviewState, block: &RenderBlock, 
             if !info.is_empty() {
                 ui.label(RichText::new(info).small().color(Color32::GRAY));
             }
-            egui::Frame::none()
+            Frame::none()
                 .fill(Color32::from_rgb(0xF1, 0xF5, 0xF9))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
@@ -562,10 +1052,156 @@ fn paint_block_view(ui: &mut Ui, state: &mut PreviewState, block: &RenderBlock, 
             );
             ui.add_space(6.0);
         }
+        RenderKind::Table { .. } => {}
         RenderKind::ExtensionStub { name } => {
-            ui.label(RichText::new(format!("[扩展:{name}]")).italics().color(Color32::GRAY));
+            ui.label(
+                RichText::new(format!("[扩展:{name}]"))
+                    .italics()
+                    .color(Color32::GRAY),
+            );
         }
     }
+}
+
+fn paint_table(
+    ui: &mut Ui,
+    state: &mut PreviewState,
+    block_idx: usize,
+    block: &RenderBlock,
+    width: f32,
+    cell_click: &mut Option<(usize, usize, usize)>,
+    block_click: &mut Option<usize>,
+    edit_changed: &mut bool,
+) {
+    let RenderKind::Table { headers, rows } = &block.kind else {
+        return;
+    };
+    let cols = headers
+        .len()
+        .max(rows.iter().map(|r| r.len()).max().unwrap_or(0))
+        .max(1);
+    let col_w = ((width - 4.0) / cols as f32).max(40.0);
+    let border = Stroke::new(1.0, Color32::from_rgb(0xD8, 0xDE, 0xE6));
+
+    // clone structure for iteration (avoid borrow issues while editing)
+    let header_cells = headers.clone();
+    let body_rows = rows.clone();
+
+    let resp = ui.allocate_ui(Vec2::new(width, 0.0), |ui| {
+        paint_table_row(
+            ui,
+            state,
+            block_idx,
+            &header_cells,
+            0,
+            true,
+            cols,
+            col_w,
+            border,
+            cell_click,
+            edit_changed,
+        );
+        for (ri, row) in body_rows.iter().enumerate() {
+            paint_table_row(
+                ui,
+                state,
+                block_idx,
+                row,
+                ri + 1,
+                false,
+                cols,
+                col_w,
+                border,
+                cell_click,
+                edit_changed,
+            );
+        }
+        if state.selected == Some(block_idx) || state.editing_cell.map(|(b, _, _)| b) == Some(block_idx)
+        {
+            ui.horizontal(|ui| {
+                if ui.small_button("+行").clicked() {
+                    state.selected = Some(block_idx);
+                    state.cmd_table_add_row();
+                }
+                if ui.small_button("-行").clicked() {
+                    state.selected = Some(block_idx);
+                    state.cmd_table_remove_row();
+                }
+                if ui.small_button("+列").clicked() {
+                    state.selected = Some(block_idx);
+                    state.cmd_table_add_col();
+                }
+                if ui.small_button("-列").clicked() {
+                    state.selected = Some(block_idx);
+                    state.cmd_table_remove_col();
+                }
+            });
+        }
+    });
+    if state.editable && resp.response.clicked() && cell_click.is_none() {
+        *block_click = Some(block_idx);
+    }
+    ui.add_space(8.0);
+}
+
+fn paint_table_row(
+    ui: &mut Ui,
+    state: &mut PreviewState,
+    block_idx: usize,
+    cells: &[Vec<InlineSpan>],
+    row_i: usize,
+    header: bool,
+    cols: usize,
+    col_w: f32,
+    border: Stroke,
+    cell_click: &mut Option<(usize, usize, usize)>,
+    edit_changed: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        for c in 0..cols {
+            let spans = cells.get(c).cloned().unwrap_or_default();
+            let editing = state.editing_cell == Some((block_idx, row_i, c));
+            Frame::none()
+                .stroke(border)
+                .inner_margin(Margin::symmetric(6.0, 4.0))
+                .fill(if header {
+                    Color32::from_rgb(0xF0, 0xF2, 0xF5)
+                } else {
+                    Color32::WHITE
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width(col_w - 4.0);
+                    ui.set_max_width(col_w - 4.0);
+                    if editing {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut state.edit_buf)
+                                .desired_width(col_w - 12.0)
+                                .font(FontId::proportional(BODY_SIZE * 0.9)),
+                        );
+                        // 失焦时提交，避免每键清空 editing_cell
+                        if resp.lost_focus() {
+                            *edit_changed = true;
+                        }
+                    } else {
+                        let text = plain_text(&spans);
+                        let label = if text.is_empty() { " " } else { text.as_str() };
+                        let rich = if header {
+                            RichText::new(label).strong().size(BODY_SIZE * 0.9)
+                        } else {
+                            RichText::new(label).size(BODY_SIZE * 0.9)
+                        };
+                        let resp = ui.add(
+                            egui::Button::new(rich)
+                                .frame(false)
+                                .min_size(Vec2::new(col_w - 16.0, 20.0)),
+                        );
+                        if state.editable && resp.clicked() {
+                            *cell_click = Some((block_idx, row_i, c));
+                        }
+                    }
+                });
+        }
+    });
 }
 
 fn paint_inlines(
@@ -580,6 +1216,7 @@ fn paint_inlines(
         return;
     }
     let mut job = LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
     let mut pending_images: Vec<(String, String)> = Vec::new();
 
     for sp in spans {
@@ -597,8 +1234,11 @@ fn paint_inlines(
             fmt.background = Color32::from_rgb(0xE2, 0xE8, 0xF0);
         }
         if sp.link_url.is_some() {
-            fmt.color = Color32::from_rgb(0x0D, 0x7A, 0x6F);
-            fmt.underline = egui::Stroke::new(1.0, Color32::from_rgb(0x0D, 0x7A, 0x6F));
+            fmt.color = TEAL;
+            fmt.underline = Stroke::new(1.0, TEAL);
+        }
+        if sp.strikethrough {
+            fmt.strikethrough = Stroke::new(1.0, Color32::from_rgb(0x1C, 0x19, 0x17));
         }
         job.append(&sp.text, 0.0, fmt);
     }
@@ -629,6 +1269,7 @@ fn text_fmt(size: f32, heading: bool, sp: &InlineSpan) -> TextFormat {
     let mut fmt = TextFormat {
         font_id: FontId::proportional(size),
         color: Color32::from_rgb(0x1C, 0x19, 0x17),
+        line_height: Some(size * BODY_LINE),
         ..Default::default()
     };
     if heading || sp.strong {

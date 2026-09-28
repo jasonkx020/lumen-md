@@ -9,7 +9,24 @@ import {
   openAbsoluteFile,
   openWorkspace,
   registerAndWriteAbs,
+  settingsGet,
+  settingsSet,
+  type SettingsView,
 } from "./api";
+import type { AiCapabilityId } from "./ai/capabilities";
+import { runAiCapability } from "./ai/runAi";
+import {
+  DEFAULT_THEME,
+  parseThemeId,
+  themeIdFromAction,
+  type ThemeId,
+} from "./theme/androidStudio";
+import { AiContextMenu } from "./components/AiContextMenu";
+import {
+  AiDiffModal,
+  type AiDiffPreview,
+} from "./components/AiDiffModal";
+import { AiPanel } from "./components/AiPanel";
 import { CrepeEditor, type CrepeEditorHandle } from "./components/CrepeEditor";
 import { FileTree } from "./components/FileTree";
 import {
@@ -18,8 +35,15 @@ import {
   type MenuAction,
 } from "./components/MenuBar";
 import { runFormatAction } from "./components/editorCommands";
-import { SourceEditor } from "./components/SourceEditor";
+import { SettingsModal } from "./components/SettingsModal";
+import {
+  SourceEditor,
+  type SourceEditorHandle,
+} from "./components/SourceEditor";
 import { TabBar } from "./components/TabBar";
+import { runExport } from "./export/runExport";
+import { handleDocLinkClick } from "./links/resolveLink";
+import type { OutlineHeading } from "./markdown/extractOutline";
 import {
   absKey,
   createStandaloneTab,
@@ -64,6 +88,7 @@ function bootstrapTab(): EditorTab {
 
 export default function App() {
   const editorRef = useRef<CrepeEditorHandle>(null);
+  const sourceRef = useRef<SourceEditorHandle>(null);
   const markdownRef = useRef(WELCOME);
   const tabsRef = useRef<EditorTab[]>([]);
   const activeIdRef = useRef<string | null>(null);
@@ -76,12 +101,51 @@ export default function App() {
   const [sourceMode, setSourceMode] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [showOutline, setShowOutline] = useState(true);
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<ThemeId>(DEFAULT_THEME);
   const [treeKey, setTreeKey] = useState(0);
   const [status, setStatus] = useState("就绪");
+  const [showSettings, setShowSettings] = useState(false);
+  const [htmlEnabled, setHtmlEnabled] = useState(true);
+  const [hasAiKey, setHasAiKey] = useState(false);
+  const [aiKeyInvalid, setAiKeyInvalid] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiSelected, setAiSelected] =
+    useState<AiCapabilityId>("optimize_document");
+  const [aiNote, setAiNote] = useState("");
+  const [aiPanelStatus, setAiPanelStatus] = useState("");
+  const [aiDiff, setAiDiff] = useState<AiDiffPreview | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    open: boolean;
+    hasSelection: boolean;
+  }>({ x: 0, y: 0, open: false, hasSelection: false });
 
   tabsRef.current = tabs;
   activeIdRef.current = activeId;
+
+  const applySettingsView = useCallback((v: SettingsView) => {
+    setHtmlEnabled(v.htmlEnabled);
+    // Ollama 等本地平台无需 Key；云平台仍要求 Key
+    setHasAiKey(v.requiresApiKey ? v.hasKey : true);
+    if (!v.requiresApiKey || v.hasKey) setAiKeyInvalid(false);
+    if (v.theme) setTheme(parseThemeId(v.theme));
+  }, []);
+
+  const applyTheme = useCallback((id: ThemeId) => {
+    setTheme(id);
+    void settingsSet({ theme: id }).catch(() => {
+      /* 非 tauri 预览 */
+    });
+  }, []);
+
+  useEffect(() => {
+    void settingsGet()
+      .then(applySettingsView)
+      .catch(() => {
+        /* 非 tauri 预览 */
+      });
+  }, [applySettingsView]);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const dirty = activeTab?.dirty ?? false;
@@ -131,6 +195,117 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const getEditorSelection = useCallback(() => {
+    if (sourceMode) return sourceRef.current?.getSelection() ?? null;
+    return editorRef.current?.getSelection() ?? null;
+  }, [sourceMode]);
+
+  const applyAiResult = useCallback(
+    (text: string, replaceSelection: boolean, before?: string): boolean => {
+      if (replaceSelection) {
+        const ok = sourceMode
+          ? sourceRef.current?.replaceSelection(text)
+          : editorRef.current?.replaceSelection(text);
+        if (ok) {
+          markDirtyFrom(currentEditorMarkdown());
+          return true;
+        }
+        // 对比弹窗会丢失选区：用原文首次匹配回退写回
+        if (before) {
+          const md = currentEditorMarkdown();
+          const idx = md.indexOf(before);
+          if (idx >= 0) {
+            const next =
+              md.slice(0, idx) + text + md.slice(idx + before.length);
+            if (!sourceMode) editorRef.current?.setMarkdown(next);
+            markDirtyFrom(next);
+            return true;
+          }
+        }
+        return false;
+      }
+      if (sourceMode) {
+        markDirtyFrom(text);
+      } else {
+        editorRef.current?.setMarkdown(text);
+        markDirtyFrom(text);
+      }
+      return true;
+    },
+    [currentEditorMarkdown, markDirtyFrom, sourceMode],
+  );
+
+  const runAi = useCallback(
+    async (id: AiCapabilityId, note?: string) => {
+      if (!hasAiKey || aiKeyInvalid) {
+        setStatus("请先在 设置 → AI 中配置 API Key");
+        setShowSettings(true);
+        return;
+      }
+      setAiBusy(true);
+      setAiPanelStatus("正在请求模型…");
+      setAiSelected(id);
+      try {
+        const md = currentEditorMarkdown();
+        const selection = getEditorSelection();
+        const result = await runAiCapability({
+          id,
+          markdown: md,
+          selection,
+          note: note ?? aiNote,
+        });
+        setAiDiff({
+          label: result.label,
+          before: result.before,
+          after: result.text,
+          replaceSelection: result.replaceSelection,
+          warn: result.warn,
+        });
+        const msg = result.warn
+          ? `待确认：${result.label}（${result.warn}）`
+          : `待确认：${result.label} — 请对比后选择是否启用`;
+        setStatus(msg);
+        setAiPanelStatus(msg);
+      } catch (e) {
+        const err = String(e);
+        if (/API Key|401|403|鉴权|权限/i.test(err)) {
+          setAiKeyInvalid(true);
+          setAiPanelStatus("Key 不可用，请重新配置");
+          setStatus("API Key 无效，请到设置中检查");
+        } else {
+          setAiPanelStatus(`失败: ${err}`);
+          setStatus(`AI 失败: ${err}`);
+        }
+      } finally {
+        setAiBusy(false);
+      }
+    },
+    [
+      aiKeyInvalid,
+      aiNote,
+      applyAiResult,
+      currentEditorMarkdown,
+      getEditorSelection,
+      hasAiKey,
+    ],
+  );
+
+  const onEditorContextMenu = useCallback(
+    (e: MouseEvent) => {
+      e.preventDefault();
+      const sel = sourceMode
+        ? sourceRef.current?.getSelection() ?? null
+        : editorRef.current?.getSelection() ?? null;
+      setCtxMenu({
+        x: e.clientX,
+        y: e.clientY,
+        open: true,
+        hasSelection: !!sel,
+      });
+    },
+    [sourceMode],
+  );
 
   const focusTab = useCallback(
     (id: string) => {
@@ -322,21 +497,76 @@ export default function App() {
 
   const newFile = useCallback(async () => {
     if (workspaceRoot) {
-      const name = window.prompt("文件名（相对路径）", "untitled.md");
+      const name = window.prompt("文件名（相对路径，默认 .md）", "untitled.md");
       if (!name) return;
-      const rel = name.replace(/\\/g, "/");
+      let rel = name.replace(/\\/g, "/").trim();
+      // 新建标签默认 CommonMark/GFM（.md），不默认 .html
+      if (!/\.(md|markdown|txt)$/i.test(rel)) {
+        rel = `${rel.replace(/\.(html?|htm)$/i, "")}.md`;
+      }
       try {
         await fsCreate(rel);
         setTreeKey((k) => k + 1);
         await openWorkspaceFile(rel);
+        setStatus(`已新建 Markdown：${rel}`);
       } catch (e) {
         setStatus(`新建失败: ${e}`);
       }
       return;
     }
     openOrFocusTab(createUntitledTab(""));
-    setStatus("已新建未命名文件");
+    setStatus("已新建未命名 Markdown");
   }, [workspaceRoot, openOrFocusTab, openWorkspaceFile]);
+
+  const jumpOutline = useCallback(
+    (heading: OutlineHeading) => {
+      if (sourceMode) {
+        sourceRef.current?.scrollToLine(heading.line);
+        setStatus(`大纲 → 第 ${heading.line} 行`);
+        return;
+      }
+      editorRef.current?.scrollToHeading(heading.index);
+      setStatus(`大纲 → ${heading.text}`);
+    },
+    [sourceMode],
+  );
+
+  const onEditorLinkClick = useCallback(
+    (href: string) => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      void handleDocLinkClick(href, {
+        markdown: currentEditorMarkdown(),
+        baseRel: tab?.relPath ?? null,
+        baseAbs: tab?.absPath ?? null,
+        onAnchor: (heading) => jumpOutline(heading),
+        onOpenLocal: async ({ relPath, absPath }) => {
+          if (relPath) {
+            await openWorkspaceFile(relPath);
+            return;
+          }
+          if (absPath) {
+            try {
+              const res = await openAbsoluteFile(absPath);
+              if (res.mode === "workspace" && res.rel_path) {
+                openOrFocusTab(createWorkspaceTab(res.rel_path, res.content));
+              } else if (res.abs_path) {
+                openOrFocusTab(createStandaloneTab(res.abs_path, res.content));
+              }
+            } catch (e) {
+              setStatus(`打开链接失败: ${e}`);
+            }
+          }
+        },
+        onStatus: setStatus,
+      });
+    },
+    [
+      currentEditorMarkdown,
+      jumpOutline,
+      openOrFocusTab,
+      openWorkspaceFile,
+    ],
+  );
 
   const handleDropPath = useCallback(
     async (path: string) => {
@@ -379,6 +609,42 @@ export default function App() {
       return false;
     });
   }, []);
+
+  const doExport = useCallback(async (kind: "pdf" | "docx") => {
+    try {
+      const md = currentEditorMarkdown();
+      markdownRef.current = md;
+      setStatus(kind === "pdf" ? "正在导出 PDF…" : "正在导出 Word…");
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      const result = await runExport({
+        kind,
+        markdown: md,
+        defaultName: tab?.title ?? "export",
+      });
+      if (result === "cancelled") {
+        setStatus("已取消导出");
+        return;
+      }
+      if (kind === "docx") {
+        setStatus("已导出 Word (.docx)");
+        return;
+      }
+      const mode = result.pdfMode ?? "";
+      if (mode === "github-html") {
+        setStatus("已按 GitHub 样式导出 PDF");
+      } else if (mode === "libreoffice") {
+        setStatus("已导出 PDF（经 DOCX · LibreOffice）");
+      } else if (mode === "word") {
+        setStatus("已导出 PDF（经 DOCX · Microsoft Word）");
+      } else if (mode === "html-fallback") {
+        setStatus("已导出 PDF（简易排版）");
+      } else {
+        setStatus("已导出 PDF");
+      }
+    } catch (e) {
+      setStatus(`导出失败: ${e}`);
+    }
+  }, [currentEditorMarkdown]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -459,6 +725,12 @@ export default function App() {
         case "save":
           void doSave();
           break;
+        case "exportPdf":
+          void doExport("pdf");
+          break;
+        case "exportDoc":
+          void doExport("docx");
+          break;
         case "newFile":
           void newFile();
           break;
@@ -474,25 +746,30 @@ export default function App() {
         case "toggleOutline":
           setShowOutline((s) => !s);
           break;
-        case "themeLight":
-          setTheme("light");
-          break;
-        case "themeDark":
-          setTheme("dark");
+        case "openSettings":
+          setShowSettings(true);
           break;
         case "about":
           window.alert(
             "Lumen MD Live 0.1\n真所见即所得（Milkdown Crepe）\n需要 Windows 10/11 + WebView2\nCtrl+/ 源码 · Ctrl+W 关闭标签",
           );
           break;
-        default:
+        default: {
+          const themeId = themeIdFromAction(action);
+          if (themeId) {
+            applyTheme(themeId);
+            break;
+          }
           if (!sourceMode) {
             runFormatAction(editorRef.current?.getCrepe() ?? null, action);
           }
           break;
+        }
       }
     },
     [
+      applyTheme,
+      doExport,
       doSave,
       newFile,
       openFileDialog,
@@ -532,23 +809,43 @@ export default function App() {
             className={sourceMode ? "editor-layer is-hidden" : "editor-layer"}
           >
             <CrepeEditor
+              key={htmlEnabled ? "html-on" : "html-off"}
               ref={editorRef}
-              initialMarkdown={WELCOME}
+              initialMarkdown={markdownRef.current}
               onChange={markDirtyFrom}
+              onLinkClick={onEditorLinkClick}
+              onContextMenu={onEditorContextMenu}
+              htmlEnabled={htmlEnabled}
               className="crepe-host"
             />
           </div>
           <SourceEditor
+            ref={sourceRef}
             value={markdown}
             onChange={markDirtyFrom}
             theme={theme}
             active={sourceMode}
+            onContextMenu={onEditorContextMenu}
           />
         </main>
         {showOutline ? (
-          <aside className="sidebar right">
-            <div className="panel-title">大纲</div>
-            <Outline markdown={markdown} />
+          <aside className="sidebar right sidebar-right-stack">
+            <div className="outline-pane">
+              <div className="panel-title">大纲</div>
+              <Outline markdown={markdown} onJump={jumpOutline} />
+            </div>
+            <AiPanel
+              hasKey={hasAiKey}
+              keyInvalid={aiKeyInvalid}
+              busy={aiBusy}
+              selectedId={aiSelected}
+              note={aiNote}
+              onSelect={setAiSelected}
+              onNoteChange={setAiNote}
+              onRun={() => void runAi(aiSelected)}
+              onOpenSettings={() => setShowSettings(true)}
+              statusText={aiPanelStatus}
+            />
           </aside>
         ) : null}
       </div>
@@ -559,6 +856,72 @@ export default function App() {
           {tabs.length > 1 ? ` · ${tabs.length} 标签` : ""}
         </span>
       </footer>
+      <SettingsModal
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        onChanged={applySettingsView}
+      />
+      <AiDiffModal
+        preview={aiDiff}
+        onAccept={() => {
+          if (!aiDiff) return;
+          const ok = applyAiResult(
+            aiDiff.after,
+            aiDiff.replaceSelection,
+            aiDiff.before,
+          );
+          if (!ok) {
+            const msg =
+              "启用失败：原文已变化或找不到选区，请手动复制「处理后」内容";
+            setStatus(msg);
+            setAiPanelStatus(msg);
+            return;
+          }
+          const msg = `已启用：${aiDiff.label}`;
+          setStatus(msg);
+          setAiPanelStatus(msg);
+          setAiDiff(null);
+        }}
+        onDiscard={() => {
+          if (aiDiff) {
+            const msg = `已丢弃：${aiDiff.label}`;
+            setStatus(msg);
+            setAiPanelStatus(msg);
+          }
+          setAiDiff(null);
+        }}
+      />
+      <AiContextMenu
+        open={ctxMenu.open}
+        x={ctxMenu.x}
+        y={ctxMenu.y}
+        hasKey={hasAiKey && !aiKeyInvalid}
+        hasSelection={ctxMenu.hasSelection}
+        onRun={(id) => void runAi(id)}
+        onEdit={(action) => {
+          if (!sourceMode) {
+            editorRef.current?.focus();
+            runFormatAction(editorRef.current?.getCrepe() ?? null, action);
+            return;
+          }
+          sourceRef.current?.focus();
+          const cmd =
+            action === "cut"
+              ? "cut"
+              : action === "copy"
+                ? "copy"
+                : action === "paste"
+                  ? "paste"
+                  : "selectAll";
+          try {
+            document.execCommand(cmd);
+          } catch {
+            /* ignore */
+          }
+        }}
+        onOpenSettings={() => setShowSettings(true)}
+        onClose={() => setCtxMenu((m) => ({ ...m, open: false }))}
+      />
     </div>
   );
 }
