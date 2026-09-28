@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -11,6 +12,7 @@ import {
   registerAndWriteAbs,
   settingsGet,
   settingsSet,
+  takeStartupFiles,
   type SettingsView,
 } from "./api";
 import type { AiCapabilityId } from "./ai/capabilities";
@@ -581,6 +583,7 @@ export default function App() {
           } else if (res.abs_path) {
             openOrFocusTab(createStandaloneTab(res.abs_path, res.content));
           }
+          setStatus(`已打开 ${path.split(/[/\\]/).pop() ?? path}`);
         } else {
           const root = await openWorkspace(path);
           setWorkspaceRoot(root);
@@ -593,6 +596,47 @@ export default function App() {
     },
     [openOrFocusTab],
   );
+
+  // 系统「打开方式」/ 命令行传入的文件：冷启动 + 二次实例
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const openPaths = async (paths: string[]) => {
+      for (const p of paths) {
+        if (disposed) return;
+        if (!isMdPath(p)) continue;
+        await handleDropPath(p);
+      }
+    };
+
+    void (async () => {
+      try {
+        const startup = await takeStartupFiles();
+        if (!disposed && startup.length > 0) {
+          await openPaths(startup);
+        }
+      } catch {
+        /* 非 Tauri / 命令未注册 */
+      }
+    })();
+
+    void listen<string[]>("open-files", (event) => {
+      void openPaths(event.payload ?? []);
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        /* not in tauri */
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleDropPath]);
 
   const toggleSourceMode = useCallback(() => {
     setSourceMode((prev) => {

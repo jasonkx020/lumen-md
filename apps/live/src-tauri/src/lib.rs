@@ -21,6 +21,8 @@ pub struct AppState {
     pub workspace: Mutex<Option<Workspace>>,
     /// 独立打开过的绝对路径白名单（多 Tab 可同时多个）。
     pub allowed_abs: Mutex<HashSet<PathBuf>>,
+    /// 启动时通过命令行传入的待打开 Markdown 路径（前端 take 一次后清空）。
+    pub startup_files: Mutex<Vec<String>>,
 }
 
 impl Default for AppState {
@@ -28,6 +30,7 @@ impl Default for AppState {
         Self {
             workspace: Mutex::new(None),
             allowed_abs: Mutex::new(HashSet::new()),
+            startup_files: Mutex::new(Vec::new()),
         }
     }
 }
@@ -492,6 +495,71 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 从命令行参数中提取可打开的 Markdown/文本路径。
+fn collect_open_files_from_args<I, S>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for maybe in args {
+        let s = maybe.as_ref().trim();
+        if s.is_empty() || s.starts_with('-') {
+            continue;
+        }
+        let path = if let Ok(url) = url::Url::parse(s) {
+            if url.scheme() == "file" {
+                url.to_file_path().ok()
+            } else {
+                None
+            }
+        } else {
+            Some(PathBuf::from(s))
+        };
+        let Some(p) = path else {
+            continue;
+        };
+        if !p.is_file() {
+            continue;
+        }
+        if !is_allowed_text_ext(&p) {
+            continue;
+        }
+        let display = std::fs::canonicalize(&p)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .into_owned();
+        // Windows canonicalize 可能带 \\?\ 前缀，前端/对话框更习惯普通路径
+        let display = display
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&display)
+            .to_string();
+        if !out.iter().any(|x| x == &display) {
+            out.push(display);
+        }
+    }
+    out
+}
+
+/// 前端启动时取走命令行传入的文件路径（只取一次）。
+#[tauri::command]
+fn take_startup_files(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(std::mem::take(&mut *state.startup_files.lock()))
+}
+
+fn emit_open_files(app: &tauri::AppHandle, files: Vec<String>) {
+    if files.is_empty() {
+        return;
+    }
+    use tauri::{Emitter, Manager};
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_focus();
+        let _ = win.emit("open-files", files);
+    } else {
+        let _ = app.emit("open-files", files);
+    }
+}
+
 fn is_under(path: &Path, root: &Path) -> bool {
     let Ok(p) = std::fs::canonicalize(path) else {
         return false;
@@ -512,10 +580,27 @@ fn relativize(path: &Path, root: &Path) -> Option<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let startup = collect_open_files_from_args(std::env::args().skip(1));
+
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::default())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let files = collect_open_files_from_args(argv.iter().skip(1).map(|s| s.as_str()));
+            emit_open_files(app, files);
+        }));
+    }
+
+    let state = AppState {
+        startup_files: Mutex::new(startup),
+        ..AppState::default()
+    };
+
+    builder
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
             open_workspace,
             get_workspace_root,
@@ -534,6 +619,7 @@ pub fn run() {
             settings_clear_key,
             llm_test,
             llm_complete,
+            take_startup_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

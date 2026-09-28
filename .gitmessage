@@ -1,0 +1,30 @@
+# <type>(<scope>): <subject>
+#
+# 类型 type（必填）:
+#   feat     新功能
+#   fix      缺陷修复
+#   docs     文档
+#   style    格式（不影响逻辑）
+#   refactor 重构
+#   perf     性能
+#   test     测试
+#   build    构建/依赖
+#   ci       CI 配置
+#   chore    杂项
+#   revert   回滚
+#
+# scope 示例（可选）: live | classic | export | ai | docs
+# subject: 祈使语气短句，勿以句号/. /。结尾；整行建议 ≤72 字符
+#
+# 正文（可选，与首行之间空一行）:
+# - 为什么改 / 影响范围
+# - 关键行为变化
+#
+# 页脚（可选）:
+# Fixes: #123
+# Refs: #456
+#
+# 示例:
+# feat(live): add export progress overlay
+#
+# Show a simulated progress bar after the save path is chosen.

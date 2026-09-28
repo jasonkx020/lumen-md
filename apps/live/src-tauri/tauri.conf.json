@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Lumen MD Live",
         "width": 1280,
         "height": 800,
@@ -33,6 +34,22 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["md", "markdown"],
+        "name": "Markdown",
+        "description": "Markdown Document",
+        "role": "Editor",
+        "mimeType": "text/markdown"
+      },
+      {
+        "ext": ["txt"],
+        "name": "Plain Text",
+        "description": "Text Document",
+        "role": "Editor",
+        "mimeType": "text/plain"
+      }
     ],
     "windows": {
       "webviewInstallMode": {

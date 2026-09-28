@@ -1,0 +1,65 @@
+#!/bin/sh
+# commit-msg: 校验 Conventional Commits / Google 风格提交说明。
+# 不合规则 exit 1，拒绝提交。
+#
+# 启用: git config core.hooksPath .githooks
+
+MSG_FILE="$1"
+
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+  echo "commit-msg: 缺少提交说明文件" >&2
+  exit 1
+fi
+
+# 去掉注释行与尾部空白，保留结构用于检测「首行后空行」
+FILTERED=$(grep -v '^#' "$MSG_FILE" | sed 's/[[:space:]]*$//')
+
+# 全空（仅注释）→ 交给 Git 自身处理；此处拒绝以免空提交说明蒙混
+if [ -z "$(printf '%s' "$FILTERED" | tr -d '[:space:]')" ]; then
+  echo "commit-msg: 提交说明为空" >&2
+  exit 1
+fi
+
+SUBJECT=$(printf '%s\n' "$FILTERED" | sed -n '1p')
+
+# Git 自动生成的合并 / 回滚说明放行
+case "$SUBJECT" in
+  Merge\ *) exit 0 ;;
+  Revert\ *) exit 0 ;;
+esac
+
+fail() {
+  echo "commit-msg: $1" >&2
+  echo "" >&2
+  echo "格式要求:" >&2
+  echo "  <type>(<scope>): <subject>" >&2
+  echo "" >&2
+  echo "示例:" >&2
+  echo "  feat(live): add export progress overlay" >&2
+  echo "" >&2
+  echo "类型: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert" >&2
+  echo "详见: docs/git/COMMIT.md" >&2
+  exit 1
+}
+
+# 1) 类型与结构
+echo "$SUBJECT" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9][a-z0-9,_/-]*\))?!?: .+$' \
+  || fail "首行不符合规范:「$SUBJECT」"
+
+# 2) 长度 ≤ 72
+LEN=$(printf '%s' "$SUBJECT" | wc -c | tr -d ' ')
+if [ "$LEN" -gt 72 ]; then
+  fail "首行过长（${LEN} > 72）:「$SUBJECT」"
+fi
+
+# 3) subject 不以 . 或 。结尾（整行末尾）
+echo "$SUBJECT" | grep -Eq '[.。]$' && fail "subject 勿以句号结尾:「$SUBJECT」"
+
+# 4) 若有正文：首行与正文之间必须有空行
+# 第 2 行非空 ⇒ 缺空行（正文紧贴首行）
+LINE2=$(printf '%s\n' "$FILTERED" | sed -n '2p')
+if [ -n "$LINE2" ]; then
+  fail "首行与正文之间必须空一行"
+fi
+
+exit 0
