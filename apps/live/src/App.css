@@ -719,6 +719,55 @@ body,
   font-weight: 600;
 }
 
+/* 导出模拟进度遮罩 */
+.export-progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.28);
+  pointer-events: all;
+}
+
+.export-progress-panel {
+  width: min(360px, 88vw);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px 14px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.export-progress-panel h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.export-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.export-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.18s ease-out;
+}
+
+.export-progress-pct {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+
 /* AI panel under outline */
 .ai-pane {
   flex: 0 0 auto;

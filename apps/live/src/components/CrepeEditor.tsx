@@ -6,10 +6,15 @@ import {
 } from "react";
 import { Crepe } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
+import type { Ctx } from "@milkdown/kit/ctx";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import { replaceAll } from "@milkdown/kit/utils";
 import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
 import { htmlPreviewView } from "../markdown/htmlNodes";
+import {
+  htmlTablePromotePlugin,
+  serializeMarkdownPreservingHtmlTables,
+} from "../markdown/htmlTablePromote";
 import { findAnchorFromEvent } from "../links/resolveLink";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -69,7 +74,13 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         const c = crepeRef.current;
         if (c && readyRef.current) {
           try {
-            lastMdRef.current = c.getMarkdown();
+            if (htmlEnabled) {
+              c.editor.action((ctx: Ctx) => {
+                lastMdRef.current = serializeMarkdownPreservingHtmlTables(ctx);
+              });
+            } else {
+              lastMdRef.current = c.getMarkdown();
+            }
           } catch {
             /* keep last */
           }
@@ -230,13 +241,21 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         },
       });
       if (htmlEnabled) {
-        crepe.editor.use(htmlPreviewView);
+        crepe.editor.use(htmlPreviewView).use(htmlTablePromotePlugin);
       }
       crepe.on((listener) => {
-        listener.markdownUpdated((_ctx, markdown) => {
+        listener.markdownUpdated((ctx, markdown) => {
           if (suppressRef.current > 0) return;
-          lastMdRef.current = markdown;
-          onChangeRef.current?.(markdown);
+          let next = markdown;
+          if (htmlEnabled) {
+            try {
+              next = serializeMarkdownPreservingHtmlTables(ctx as Ctx);
+            } catch {
+              /* fall back to milkdown markdown */
+            }
+          }
+          lastMdRef.current = next;
+          onChangeRef.current?.(next);
         });
       });
       crepeRef.current = crepe;

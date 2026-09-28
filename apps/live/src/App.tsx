@@ -41,7 +41,9 @@ import {
   type SourceEditorHandle,
 } from "./components/SourceEditor";
 import { TabBar } from "./components/TabBar";
+import { ExportProgress } from "./components/ExportProgress";
 import { runExport } from "./export/runExport";
+import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
 import type { OutlineHeading } from "./markdown/extractOutline";
 import {
@@ -120,6 +122,7 @@ export default function App() {
     open: boolean;
     hasSelection: boolean;
   }>({ x: 0, y: 0, open: false, hasSelection: false });
+  const exportProgress = useSimulatedProgress();
 
   tabsRef.current = tabs;
   activeIdRef.current = activeId;
@@ -616,35 +619,30 @@ export default function App() {
       markdownRef.current = md;
       setStatus(kind === "pdf" ? "正在导出 PDF…" : "正在导出 Word…");
       const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      const label =
+        kind === "pdf" ? "正在导出 PDF…" : "正在导出 Word…";
       const result = await runExport({
         kind,
         markdown: md,
         defaultName: tab?.title ?? "export",
+        onWorkStart: () => exportProgress.start(label),
       });
       if (result === "cancelled") {
+        exportProgress.fail();
         setStatus("已取消导出");
         return;
       }
+      await exportProgress.finish();
       if (kind === "docx") {
         setStatus("已导出 Word (.docx)");
         return;
       }
-      const mode = result.pdfMode ?? "";
-      if (mode === "github-html") {
-        setStatus("已按 GitHub 样式导出 PDF");
-      } else if (mode === "libreoffice") {
-        setStatus("已导出 PDF（经 DOCX · LibreOffice）");
-      } else if (mode === "word") {
-        setStatus("已导出 PDF（经 DOCX · Microsoft Word）");
-      } else if (mode === "html-fallback") {
-        setStatus("已导出 PDF（简易排版）");
-      } else {
-        setStatus("已导出 PDF");
-      }
+      setStatus("已导出 PDF");
     } catch (e) {
+      exportProgress.fail();
       setStatus(`导出失败: ${e}`);
     }
-  }, [currentEditorMarkdown]);
+  }, [currentEditorMarkdown, exportProgress.start, exportProgress.finish, exportProgress.fail]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -751,7 +749,7 @@ export default function App() {
           break;
         case "about":
           window.alert(
-            "Lumen MD Live 0.1\n真所见即所得（Milkdown Crepe）\n需要 Windows 10/11 + WebView2\nCtrl+/ 源码 · Ctrl+W 关闭标签",
+            "Lumen MD Live 0.1\n真所见即所得 Markdown 编辑器\n需要 Windows 10/11\nCtrl+/ 源码 · Ctrl+W 关闭标签",
           );
           break;
         default: {
@@ -856,6 +854,11 @@ export default function App() {
           {tabs.length > 1 ? ` · ${tabs.length} 标签` : ""}
         </span>
       </footer>
+      <ExportProgress
+        visible={exportProgress.visible}
+        percent={exportProgress.percent}
+        label={exportProgress.label}
+      />
       <SettingsModal
         open={showSettings}
         onClose={() => setShowSettings(false)}

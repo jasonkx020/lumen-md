@@ -1,6 +1,8 @@
 //! Lumen MD Live — Tauri 命令与沙箱 FS IPC。
 
 mod export_file;
+mod html_sanitize;
+mod html_table_docx;
 mod llm;
 mod md_docx;
 mod sandbox_fs;

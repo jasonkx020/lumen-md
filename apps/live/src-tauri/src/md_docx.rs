@@ -4,8 +4,11 @@
 use std::io::Cursor;
 
 use comrak::nodes::{AstNode, ListType, NodeValue, TableAlignment};
-use comrak::{parse_document, Arena, Options};
+use comrak::{format_html, parse_document, Arena, Options};
 use docx_rs::*;
+
+use crate::html_sanitize::{is_html_table, sanitize_html_fragment};
+use crate::html_table_docx::try_html_to_docx_table;
 
 const MAX_EXPORT_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -47,6 +50,29 @@ fn gfm_options() -> Options<'static> {
     options.extension.tasklist = true;
     options.extension.autolink = true;
     options
+}
+
+/// PDF/HTML 导出：在已消毒前提下允许透传原始 HTML（保留 table/rowspan）。
+fn gfm_options_allow_sanitized_html() -> Options<'static> {
+    let mut options = gfm_options();
+    options.render.r#unsafe = true;
+    options
+}
+
+/// 就地消毒 AST 中的 HtmlBlock / HtmlInline。
+fn sanitize_html_nodes<'a>(root: &'a AstNode<'a>) {
+    for node in root.descendants() {
+        let mut data = node.data.borrow_mut();
+        match &mut data.value {
+            NodeValue::HtmlBlock(hb) => {
+                hb.literal = sanitize_html_fragment(&hb.literal);
+            }
+            NodeValue::HtmlInline(s) => {
+                *s = sanitize_html_fragment(s);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn body_fonts() -> RunFonts {
@@ -124,7 +150,12 @@ pub fn markdown_to_github_html(markdown: &str) -> anyhow::Result<String> {
     if markdown.len() as u64 > MAX_EXPORT_BYTES {
         anyhow::bail!("导出内容超过上限 {} bytes", MAX_EXPORT_BYTES);
     }
-    let body = comrak::markdown_to_html(markdown, &gfm_options());
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &gfm_options());
+    sanitize_html_nodes(root);
+    let mut body = String::new();
+    format_html(root, &gfm_options_allow_sanitized_html(), &mut body)
+        .map_err(|e| anyhow::anyhow!("HTML 渲染失败: {e}"))?;
     Ok(format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -222,16 +253,20 @@ body {{
 .markdown-body table {{
   border-spacing: 0;
   border-collapse: collapse;
-  width: max-content;
+  table-layout: fixed;
+  width: 100%;
   max-width: 100%;
-  display: block;
-  overflow: auto;
+  border: none;
+}}
+/* 覆盖 HTML border="1" 等属性带来的浏览器默认黑框，四边与横线同色 */
+.markdown-body table[border],
+.markdown-body table[border] th,
+.markdown-body table[border] td {{
+  border-color: var(--border) !important;
 }}
 .markdown-body table th, .markdown-body table td {{
   padding: 6px 13px;
-  border: none;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
   vertical-align: top;
 }}
 .markdown-body table th {{
@@ -610,7 +645,18 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
             docx.add_table(table)
         }
         NodeValue::HtmlBlock(hb) => {
-            let text = strip_rough_html(&hb.literal);
+            if is_html_table(&hb.literal) {
+                if let Some(table) = try_html_to_docx_table(
+                    &hb.literal,
+                    TABLE_WIDTH_DXA,
+                    COLOR_TABLE_HEADER,
+                    md_cell_borders,
+                    md_table_borders(),
+                ) {
+                    return docx.add_table(table);
+                }
+            }
+            let text = strip_rough_html(&sanitize_html_fragment(&hb.literal));
             if text.trim().is_empty() {
                 docx
             } else {
@@ -1008,7 +1054,7 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
                 out.push(InlinePiece::Run(styled_run(&label, style).italic()));
             }
             NodeValue::HtmlInline(s) => {
-                let t = strip_rough_html(&s);
+                let t = strip_rough_html(&sanitize_html_fragment(&s));
                 if !t.is_empty() {
                     out.push(InlinePiece::Run(styled_run(&t, style)));
                 }
@@ -1358,20 +1404,76 @@ fn main() {}
     }
 
     #[test]
+    fn github_html_preserves_sanitized_html_table_rowspan() {
+        let md = r#"before
+
+<table border="1">
+  <tr>
+    <td rowspan="2">文件状态</td>
+    <td>版本</td>
+  </tr>
+  <tr>
+    <td>1.0</td>
+  </tr>
+</table>
+
+after
+"#;
+        let html = markdown_to_github_html(md).unwrap();
+        assert!(
+            html.contains("<table"),
+            "raw HTML table should pass through after sanitize, got: {}",
+            &html[html.find("before").unwrap_or(0)..(html.find("before").unwrap_or(0) + 400).min(html.len())]
+        );
+        assert!(html.contains("rowspan"), "rowspan should be kept");
+        assert!(!html.contains("<!-- raw HTML omitted -->"));
+        assert!(!html.to_ascii_lowercase().contains("<script"));
+    }
+
+    #[test]
+    fn docx_html_table_emits_vmerge() {
+        let md = r#"
+<table>
+  <tr><td rowspan="2">A</td><td>B</td></tr>
+  <tr><td>C</td></tr>
+</table>
+"#;
+        let bytes = markdown_to_docx_bytes(md).expect("docx");
+        let cursor = std::io::Cursor::new(bytes);
+        let mut zip = zip::ZipArchive::new(cursor).expect("zip");
+        let mut file = zip.by_name("word/document.xml").expect("document.xml");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut file, &mut xml).unwrap();
+        assert!(
+            xml.contains("w:vMerge") || xml.contains("vMerge"),
+            "expected vertical merge in OOXML, snippet missing vMerge"
+        );
+        assert!(xml.contains('A') && xml.contains('B') && xml.contains('C'));
+    }
+
     #[test]
     fn probe_html_table_escape() {
         let md = "before\n\n<table style=\"writing-mode: vertical-rl\"><tr><th>jia</th><td>1</td></tr></table>\n\nafter\n";
         let html = markdown_to_github_html(md).unwrap();
-        eprintln!("HAS_RAW_TABLE={}", html.contains("<table"));
-        let escaped = format!("{}{}", "&lt;", "table");
-        eprintln!("HAS_ESCAPED={}", html.contains(&escaped));
-        let idx = html.find("before").unwrap_or(0);
-        eprintln!("SNIP={}", &html[idx..(idx + 500).min(html.len())]);
+        assert!(html.contains("<table"), "table should not be omitted");
     }
 
+    #[test]
     fn standalone_html_has_table_css() {
         let html = markdown_to_standalone_html("|a|b|\n|-|-|\n|1|2|\n").unwrap();
         assert!(html.contains("<table"));
         assert!(html.contains("markdown-body"));
+        assert!(
+            html.contains("width: 100%") && html.contains("table-layout: fixed"),
+            "PDF table CSS should be full-width like the editor"
+        );
+        assert!(
+            !html.contains("max-content"),
+            "PDF table CSS must not use width: max-content"
+        );
+        assert!(
+            html.contains("border: 1px solid var(--border)"),
+            "cell borders should use shared --border color on all sides"
+        );
     }
 }

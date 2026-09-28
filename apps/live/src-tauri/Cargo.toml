@@ -31,6 +31,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # MD→DOCX：BSD-2-Clause + MIT，可商用；不引入 Pandoc / GPL
 comrak = { version = "0.49", default-features = false }
 docx-rs = "0.4"
+# HTML 消毒 / 表解析（导出 HTML table 含 rowspan）
+ammonia = "4"
+scraper = "0.22"
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }

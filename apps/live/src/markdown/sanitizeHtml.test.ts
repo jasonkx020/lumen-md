@@ -4,6 +4,7 @@
  */
 import { sanitizeHtml } from "./sanitizeHtml";
 import { extractOutline } from "./extractOutline";
+import { isTableHtml, parseHtmlTable } from "./htmlTable";
 
 export function runSanitizeSelfCheck(): string[] {
   const errors: string[] = [];
@@ -15,7 +16,7 @@ export function runSanitizeSelfCheck(): string[] {
   );
   if (!details.includes("details")) errors.push("details not kept");
 
-  const colored = sanitizeHtml('<span style="color: #0f766e">teal</span>');
+  const colored = sanitizeHtml('<span style="color: #0f766e">teal text</span>');
   if (!colored.includes("teal")) errors.push("span text lost");
 
   const danger = sanitizeHtml('<script>alert(1)</script><p>ok</p>');
@@ -27,6 +28,12 @@ export function runSanitizeSelfCheck(): string[] {
   );
   if (!table.toLowerCase().includes("<table")) errors.push("table not kept");
   if (!table.includes("甲")) errors.push("table cell text lost");
+
+  const sample = `<table><tr><td rowspan="2">A</td><td>B</td></tr><tr><td>C</td></tr></table>`;
+  if (!isTableHtml(sample)) errors.push("isTableHtml failed");
+  const parsed = parseHtmlTable(sample);
+  if (!parsed || parsed.length !== 2) errors.push("parseHtmlTable rows");
+  if (parsed?.[0]?.[0]?.rowspan !== 2) errors.push("parseHtmlTable rowspan");
 
   const outline = extractOutline(
     "# A\n```\n# not\n```\n## B\n",
