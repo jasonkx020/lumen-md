@@ -66,6 +66,53 @@ impl LlmPlatform {
     }
 }
 
+/// 启发式判断当前模型是否支持视觉多模态（OpenAI 兼容 vision）。
+pub fn model_supports_vision(platform: LlmPlatform, model: &str) -> bool {
+    let m = model.trim().to_lowercase();
+    if m.is_empty() {
+        return false;
+    }
+    // 明显纯文本
+    if m.contains("gpt-3.5") || m == "deepseek-chat" || m == "deepseek-reasoner" {
+        return false;
+    }
+
+    match platform {
+        LlmPlatform::Openai => {
+            m.contains("gpt-4o")
+                || m.contains("gpt-4.1")
+                || m.contains("gpt-4-turbo")
+                || m.contains("gpt-4-vision")
+                || m.starts_with("o1")
+                || m.starts_with("o3")
+                || m.starts_with("o4")
+                || m.contains("vision")
+        }
+        LlmPlatform::Zhipu => {
+            m.contains("glm-4v") || m.contains("glm-4.1v") || m.contains("glm-4v-")
+        }
+        LlmPlatform::Qwen => {
+            m.contains("qwen-vl")
+                || m.contains("qwen2-vl")
+                || m.contains("qwen2.5-vl")
+                || m.contains("qwen3-vl")
+                || m.contains("qwen2.5vl")
+        }
+        LlmPlatform::Deepseek => m.contains("deepseek-vl"),
+        LlmPlatform::Ollama => {
+            m.contains("llava")
+                || m.contains("bakllava")
+                || m.contains("moondream")
+                || m.contains("minicpm-v")
+                || m.contains("qwen2.5vl")
+                || m.contains("qwen2-vl")
+                || m.contains("qwen2.5-vl")
+                || m.contains("gemma3")
+                || m.contains("vision")
+        }
+    }
+}
+
 fn default_theme() -> String {
     "as-light".into()
 }
@@ -298,6 +345,7 @@ pub struct SettingsView {
     pub base_url: String,
     pub theme: String,
     pub requires_api_key: bool,
+    pub supports_multimodal: bool,
 }
 
 pub fn settings_view() -> SettingsView {
@@ -311,6 +359,7 @@ pub fn settings_view() -> SettingsView {
         base_url: resolve_base_url(&prefs),
         theme: normalize_theme(&prefs.theme),
         requires_api_key: prefs.platform.requires_api_key(),
+        supports_multimodal: model_supports_vision(prefs.platform, &prefs.model),
     }
 }
 

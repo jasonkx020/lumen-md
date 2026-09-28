@@ -11,6 +11,9 @@ export type RunAiInput = {
   markdown: string;
   selection: string | null;
   note?: string;
+  /** data URL 图片，需视觉模型 */
+  images?: string[];
+  supportsMultimodal?: boolean;
 };
 
 export type RunAiResult = {
@@ -24,6 +27,19 @@ export type RunAiResult = {
 
 export async function runAiCapability(input: RunAiInput): Promise<RunAiResult> {
   const cap = getCapability(input.id);
+  const images = (input.images ?? []).filter((u) => u.trim().length > 0);
+
+  if (cap.requiresMultimodal) {
+    if (!input.supportsMultimodal) {
+      throw new Error(
+        "当前模型不支持多模态，请在设置中更换视觉模型（如 gpt-4o-mini、glm-4v-flash、qwen-vl-plus、llava）",
+      );
+    }
+    if (images.length === 0) {
+      throw new Error("请先在 AI 面板中添加图片");
+    }
+  }
+
   const scoped = resolveCapabilityContent(input.id, {
     markdown: input.markdown,
     selection: input.selection,
@@ -32,6 +48,7 @@ export async function runAiCapability(input: RunAiInput): Promise<RunAiResult> {
   const text = await llmComplete({
     system: cap.systemPrompt,
     user,
+    images: images.length > 0 ? images : undefined,
   });
   return {
     before: scoped.content,

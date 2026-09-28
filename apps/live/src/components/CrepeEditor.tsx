@@ -8,7 +8,7 @@ import { Crepe } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
 import { TextSelection } from "@milkdown/kit/prose/state";
-import { replaceAll } from "@milkdown/kit/utils";
+import { replaceAll, replaceRange } from "@milkdown/kit/utils";
 import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
 import { htmlPreviewView } from "../markdown/htmlNodes";
 import {
@@ -140,7 +140,8 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             const view = ctx.get(editorViewCtx);
             const { from, to, empty } = view.state.selection;
             if (empty) return;
-            view.dispatch(view.state.tr.insertText(text, from, to));
+            // 按 Markdown 解析后替换选区，避免 **/# 等被当成纯文本
+            replaceRange(text, { from, to })(ctx);
             ok = true;
           });
           return ok;

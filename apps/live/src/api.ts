@@ -88,6 +88,7 @@ export type SettingsView = {
   baseUrl: string;
   theme: string;
   requiresApiKey: boolean;
+  supportsMultimodal: boolean;
 };
 
 export async function settingsGet(): Promise<SettingsView> {
@@ -142,10 +143,13 @@ export async function llmComplete(args: {
   system: string;
   user: string;
   temperature?: number;
+  /** data URL 或 http(s) URL，最多 3 张 */
+  images?: string[];
 }): Promise<string> {
   return invoke("llm_complete", {
     system: args.system,
     user: args.user,
     temperature: args.temperature ?? null,
+    images: args.images?.length ? args.images : null,
   });
 }

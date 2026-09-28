@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  AI_CAPABILITIES,
+  getQuickCapabilities,
   type AiCapabilityId,
 } from "../ai/capabilities";
 
@@ -13,14 +13,17 @@ type Props = {
   open: boolean;
   hasKey: boolean;
   hasSelection: boolean;
+  /** 即时能力：空 note 一键跑 */
   onRun: (id: AiCapabilityId) => void;
+  /** 打开完整 AI 面板（可写补充说明） */
+  onOpenAiPanel: () => void;
   onEdit: (action: EditMenuAction) => void;
   onOpenSettings: () => void;
   onClose: () => void;
 };
 
 const PAD = 8;
-/** 4 编辑项 + 分隔 + 最多 4 个 AI 项，用于首帧估算 */
+/** 编辑项 + 分隔 + 少量即时 AI + 打开面板 */
 const EST_W = 220;
 const EST_H = 320;
 
@@ -48,12 +51,14 @@ export function AiContextMenu({
   hasKey,
   hasSelection,
   onRun,
+  onOpenAiPanel,
   onEdit,
   onOpenSettings,
   onClose,
 }: Props) {
   const [pos, setPos] = useState(() => clampPos(x, y, EST_W, EST_H));
   const rootRef = useRef<HTMLDivElement>(null);
+  const quick = getQuickCapabilities();
 
   useEffect(() => {
     if (!open) return;
@@ -150,26 +155,38 @@ export function AiContextMenu({
           配置 API Key…
         </button>
       ) : (
-        AI_CAPABILITIES.map((c) => {
-          const needSel =
-            c.id === "polish" || c.id === "rewrite_selection";
-          const disabled = needSel && !hasSelection;
-          return (
-            <button
-              key={c.id}
-              type="button"
-              className="ai-context-item"
-              disabled={disabled}
-              title={disabled ? "请先选中文本" : c.description}
-              onClick={() => {
-                onRun(c.id);
-                onClose();
-              }}
-            >
-              {c.label}
-            </button>
-          );
-        })
+        <>
+          {quick.map((c) => {
+            const needSel = c.scope === "selection_required";
+            const disabled = needSel && !hasSelection;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                className="ai-context-item"
+                disabled={disabled}
+                title={disabled ? "请先选中文本" : c.description}
+                onClick={() => {
+                  onRun(c.id);
+                  onClose();
+                }}
+              >
+                {c.label}
+              </button>
+            );
+          })}
+          <div className="ai-context-sep" />
+          <button
+            type="button"
+            className="ai-context-item"
+            onClick={() => {
+              onOpenAiPanel();
+              onClose();
+            }}
+          >
+            在 AI 面板中打开…
+          </button>
+        </>
       )}
     </div>,
     document.body,

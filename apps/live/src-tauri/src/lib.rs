@@ -476,8 +476,9 @@ async fn llm_complete(
     system: String,
     user: String,
     temperature: Option<f32>,
+    images: Option<Vec<String>>,
 ) -> Result<String, String> {
-    llm::complete(&system, &user, temperature).await
+    llm::complete(&system, &user, temperature, images).await
 }
 
 #[allow(dead_code)]

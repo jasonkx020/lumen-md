@@ -28,7 +28,7 @@ import {
   AiDiffModal,
   type AiDiffPreview,
 } from "./components/AiDiffModal";
-import { AiPanel } from "./components/AiPanel";
+import { AiPanel, type AiPanelHandle } from "./components/AiPanel";
 import { CrepeEditor, type CrepeEditorHandle } from "./components/CrepeEditor";
 import { FileTree } from "./components/FileTree";
 import {
@@ -93,6 +93,7 @@ function bootstrapTab(): EditorTab {
 export default function App() {
   const editorRef = useRef<CrepeEditorHandle>(null);
   const sourceRef = useRef<SourceEditorHandle>(null);
+  const aiPanelRef = useRef<AiPanelHandle>(null);
   const markdownRef = useRef(WELCOME);
   const tabsRef = useRef<EditorTab[]>([]);
   const activeIdRef = useRef<string | null>(null);
@@ -105,6 +106,7 @@ export default function App() {
   const [sourceMode, setSourceMode] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [showOutline, setShowOutline] = useState(true);
+  const [showAiPanel, setShowAiPanel] = useState(true);
   const [theme, setTheme] = useState<ThemeId>(DEFAULT_THEME);
   const [treeKey, setTreeKey] = useState(0);
   const [status, setStatus] = useState("就绪");
@@ -112,10 +114,12 @@ export default function App() {
   const [htmlEnabled, setHtmlEnabled] = useState(true);
   const [hasAiKey, setHasAiKey] = useState(false);
   const [aiKeyInvalid, setAiKeyInvalid] = useState(false);
+  const [supportsMultimodal, setSupportsMultimodal] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSelected, setAiSelected] =
     useState<AiCapabilityId>("optimize_document");
   const [aiNote, setAiNote] = useState("");
+  const [aiImages, setAiImages] = useState<string[]>([]);
   const [aiPanelStatus, setAiPanelStatus] = useState("");
   const [aiDiff, setAiDiff] = useState<AiDiffPreview | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{
@@ -134,6 +138,11 @@ export default function App() {
     // Ollama 等本地平台无需 Key；云平台仍要求 Key
     setHasAiKey(v.requiresApiKey ? v.hasKey : true);
     if (!v.requiresApiKey || v.hasKey) setAiKeyInvalid(false);
+    setSupportsMultimodal(!!v.supportsMultimodal);
+    if (!v.supportsMultimodal) {
+      setAiImages([]);
+      setAiSelected((id) => (id === "image_to_md" ? "optimize_document" : id));
+    }
     if (v.theme) setTheme(parseThemeId(v.theme));
   }, []);
 
@@ -259,6 +268,8 @@ export default function App() {
           markdown: md,
           selection,
           note: note ?? aiNote,
+          images: aiImages,
+          supportsMultimodal,
         });
         setAiDiff({
           label: result.label,
@@ -267,6 +278,7 @@ export default function App() {
           replaceSelection: result.replaceSelection,
           warn: result.warn,
         });
+        setAiImages([]);
         const msg = result.warn
           ? `待确认：${result.label}（${result.warn}）`
           : `待确认：${result.label} — 请对比后选择是否启用`;
@@ -287,12 +299,13 @@ export default function App() {
       }
     },
     [
+      aiImages,
       aiKeyInvalid,
       aiNote,
-      applyAiResult,
       currentEditorMarkdown,
       getEditorSelection,
       hasAiKey,
+      supportsMultimodal,
     ],
   );
 
@@ -788,6 +801,9 @@ export default function App() {
         case "toggleOutline":
           setShowOutline((s) => !s);
           break;
+        case "toggleAiPanel":
+          setShowAiPanel((s) => !s);
+          break;
         case "openSettings":
           setShowSettings(true);
           break;
@@ -870,24 +886,32 @@ export default function App() {
             onContextMenu={onEditorContextMenu}
           />
         </main>
-        {showOutline ? (
+        {showOutline || showAiPanel ? (
           <aside className="sidebar right sidebar-right-stack">
-            <div className="outline-pane">
-              <div className="panel-title">大纲</div>
-              <Outline markdown={markdown} onJump={jumpOutline} />
-            </div>
-            <AiPanel
-              hasKey={hasAiKey}
-              keyInvalid={aiKeyInvalid}
-              busy={aiBusy}
-              selectedId={aiSelected}
-              note={aiNote}
-              onSelect={setAiSelected}
-              onNoteChange={setAiNote}
-              onRun={() => void runAi(aiSelected)}
-              onOpenSettings={() => setShowSettings(true)}
-              statusText={aiPanelStatus}
-            />
+            {showOutline ? (
+              <div className="outline-pane">
+                <div className="panel-title">大纲</div>
+                <Outline markdown={markdown} onJump={jumpOutline} />
+              </div>
+            ) : null}
+            {showAiPanel ? (
+              <AiPanel
+                ref={aiPanelRef}
+                hasKey={hasAiKey}
+                keyInvalid={aiKeyInvalid}
+                busy={aiBusy}
+                selectedId={aiSelected}
+                note={aiNote}
+                supportsMultimodal={supportsMultimodal}
+                images={aiImages}
+                onSelect={setAiSelected}
+                onNoteChange={setAiNote}
+                onImagesChange={setAiImages}
+                onRun={() => void runAi(aiSelected)}
+                onOpenSettings={() => setShowSettings(true)}
+                statusText={aiPanelStatus}
+              />
+            ) : null}
           </aside>
         ) : null}
       </div>
@@ -944,7 +968,11 @@ export default function App() {
         y={ctxMenu.y}
         hasKey={hasAiKey && !aiKeyInvalid}
         hasSelection={ctxMenu.hasSelection}
-        onRun={(id) => void runAi(id)}
+        onRun={(id) => void runAi(id, "")}
+        onOpenAiPanel={() => {
+          setShowAiPanel(true);
+          window.setTimeout(() => aiPanelRef.current?.focusNote(), 50);
+        }}
         onEdit={(action) => {
           if (!sourceMode) {
             editorRef.current?.focus();

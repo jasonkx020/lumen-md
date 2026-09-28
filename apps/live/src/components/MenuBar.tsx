@@ -38,6 +38,7 @@ export type MenuAction =
   | "toggleSource"
   | "toggleSidebar"
   | "toggleOutline"
+  | "toggleAiPanel"
   | `theme:${ThemeId}`
   | "openSettings"
   | "about";
@@ -113,6 +114,7 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "源代码", action: "toggleSource", shortcut: "Ctrl+/" },
       { type: "item", label: "侧边栏", action: "toggleSidebar" },
       { type: "item", label: "大纲", action: "toggleOutline" },
+      { type: "item", label: "AI 助手", action: "toggleAiPanel" },
     ],
   },
   {

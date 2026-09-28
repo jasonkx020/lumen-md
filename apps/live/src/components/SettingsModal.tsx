@@ -13,6 +13,7 @@ const PLATFORMS: {
   defaultModel: string;
   defaultBaseUrl: string;
   requiresKey: boolean;
+  visionHint: string;
 }[] = [
   {
     id: "deepseek",
@@ -20,6 +21,7 @@ const PLATFORMS: {
     defaultModel: "deepseek-chat",
     defaultBaseUrl: "https://api.deepseek.com/v1",
     requiresKey: true,
+    visionHint: "deepseek-vl（若可用）",
   },
   {
     id: "zhipu",
@@ -27,6 +29,7 @@ const PLATFORMS: {
     defaultModel: "glm-4-flash",
     defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
     requiresKey: true,
+    visionHint: "glm-4v-flash",
   },
   {
     id: "openai",
@@ -34,6 +37,7 @@ const PLATFORMS: {
     defaultModel: "gpt-4o-mini",
     defaultBaseUrl: "https://api.openai.com/v1",
     requiresKey: true,
+    visionHint: "gpt-4o-mini",
   },
   {
     id: "qwen",
@@ -41,6 +45,7 @@ const PLATFORMS: {
     defaultModel: "qwen-plus",
     defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     requiresKey: true,
+    visionHint: "qwen-vl-plus",
   },
   {
     id: "ollama",
@@ -48,8 +53,59 @@ const PLATFORMS: {
     defaultModel: "llama3.2",
     defaultBaseUrl: "http://127.0.0.1:11434/v1",
     requiresKey: false,
+    visionHint: "llava",
   },
 ];
+
+/** 与后端 model_supports_vision 对齐的前端启发式（设置页即时提示）。 */
+function modelSupportsVisionLocal(platform: string, model: string): boolean {
+  const m = model.trim().toLowerCase();
+  if (!m) return false;
+  if (m.includes("gpt-3.5") || m === "deepseek-chat" || m === "deepseek-reasoner") {
+    return false;
+  }
+  switch (platform) {
+    case "openai":
+      return (
+        m.includes("gpt-4o") ||
+        m.includes("gpt-4.1") ||
+        m.includes("gpt-4-turbo") ||
+        m.includes("gpt-4-vision") ||
+        m.startsWith("o1") ||
+        m.startsWith("o3") ||
+        m.startsWith("o4") ||
+        m.includes("vision")
+      );
+    case "zhipu":
+      return (
+        m.includes("glm-4v") || m.includes("glm-4.1v") || m.includes("glm-4v-")
+      );
+    case "qwen":
+      return (
+        m.includes("qwen-vl") ||
+        m.includes("qwen2-vl") ||
+        m.includes("qwen2.5-vl") ||
+        m.includes("qwen3-vl") ||
+        m.includes("qwen2.5vl")
+      );
+    case "deepseek":
+      return m.includes("deepseek-vl");
+    case "ollama":
+      return (
+        m.includes("llava") ||
+        m.includes("bakllava") ||
+        m.includes("moondream") ||
+        m.includes("minicpm-v") ||
+        m.includes("qwen2.5vl") ||
+        m.includes("qwen2-vl") ||
+        m.includes("qwen2.5-vl") ||
+        m.includes("gemma3") ||
+        m.includes("vision")
+      );
+    default:
+      return false;
+  }
+}
 
 type Props = {
   open: boolean;
@@ -230,11 +286,18 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder={
-                isOllama ? "例如 llama3.2（需已 ollama pull）" : undefined
+                isOllama
+                  ? `例如 ${platformMeta.visionHint} / llama3.2`
+                  : `例如 ${platformMeta.defaultModel}；视觉：${platformMeta.visionHint}`
               }
               spellCheck={false}
             />
           </label>
+          <p className="settings-hint">
+            {modelSupportsVisionLocal(platform, model)
+              ? "当前模型支持多模态：保存后可在 AI 面板贴图 / 图片转 Markdown。"
+              : `当前模型为纯文本，贴图功能关闭。视觉示例：${platformMeta.visionHint}`}
+          </p>
           {isOllama ? (
             <label className="settings-field">
               <span>Base URL</span>
