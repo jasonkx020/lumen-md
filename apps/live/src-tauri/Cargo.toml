@@ -27,7 +27,11 @@ anyhow = "1"
 parking_lot = "0.12"
 thiserror = "1"
 directories = "5"
-keyring = { version = "3", features = ["windows-native"] }
+keyring = { version = "3", default-features = false, features = [
+  "apple-native",
+  "windows-native",
+  "sync-secret-service",
+] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # MD→DOCX：BSD-2-Clause + MIT，可商用；不引入 Pandoc / GPL

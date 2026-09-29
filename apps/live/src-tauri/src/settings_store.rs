@@ -1,4 +1,4 @@
-//! 非敏感 prefs.json + keyring（Windows 凭据管理器）存 API Key；
+//! 非敏感 prefs.json + 系统凭据库存 API Key（Win 凭据管理器 / macOS Keychain / Linux Secret Service）；
 //! keyring 不可用时回退到配置目录下的受保护本地文件。
 
 use directories::ProjectDirs;

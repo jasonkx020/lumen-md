@@ -332,7 +332,7 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
           <p className="settings-hint">
             {isOllama
               ? "本地 Ollama：请先运行 ollama serve，并 pull 对应模型。Key 可选。"
-              : "Key 保存在本机凭据管理器（静默加密），不会写入项目文件。"}{" "}
+              : "Key 保存在本机凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），不会写入项目文件。"}{" "}
             当前接口：{(view?.baseUrl ?? baseUrl) || "—"}
           </p>
         </section>

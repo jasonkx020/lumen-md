@@ -5,7 +5,7 @@ import {
   useRef,
 } from "react";
 import { Crepe } from "@milkdown/crepe";
-import { editorViewCtx } from "@milkdown/kit/core";
+import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import { replaceAll, replaceRange } from "@milkdown/kit/utils";
@@ -15,10 +15,25 @@ import {
   htmlTablePromotePlugin,
   serializeMarkdownPreservingHtmlTables,
 } from "../markdown/htmlTablePromote";
+import {
+  getSameTableCell,
+  replaceTableCellInline,
+  selectionTouchesTable,
+} from "../markdown/tableCellSelection";
 import { findAnchorFromEvent } from "../links/resolveLink";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 import "@milkdown/prose/tables/style/tables.css";
+
+export type SelectionMeta = {
+  text: string;
+  from: number;
+  to: number;
+  /** 选区完全落在同一单元格内 */
+  inTableCell: boolean;
+  /** 选区触及表格但跨格/不完整 */
+  tableSelectionBlocked: boolean;
+};
 
 export type CrepeEditorHandle = {
   getMarkdown: () => string;
@@ -28,7 +43,10 @@ export type CrepeEditorHandle = {
   getCrepe: () => Crepe | null;
   scrollToHeading: (index: number) => void;
   getSelection: () => string | null;
+  getSelectionMeta: () => SelectionMeta | null;
   replaceSelection: (text: string) => boolean;
+  /** 用保存的 from/to 写回（对比弹窗会丢掉选区） */
+  replaceRangeAt: (from: number, to: number, text: string) => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -113,6 +131,32 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
       },
       getCrepe: () => crepeRef.current,
       getHost: () => rootRef.current,
+      getSelectionMeta: () => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return null;
+        try {
+          let meta: SelectionMeta | null = null;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { from, to, empty } = view.state.selection;
+            if (empty) return;
+            const text = view.state.doc.textBetween(from, to, "\n");
+            if (!text.trim()) return;
+            const cell = getSameTableCell(view.state.doc, from, to);
+            const touches = selectionTouchesTable(view.state.doc, from, to);
+            meta = {
+              text,
+              from,
+              to,
+              inTableCell: !!cell,
+              tableSelectionBlocked: touches && !cell,
+            };
+          });
+          return meta;
+        } catch {
+          return null;
+        }
+      },
       getSelection: () => {
         const c = crepeRef.current;
         if (!c || !readyRef.current) return null;
@@ -140,7 +184,54 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             const view = ctx.get(editorViewCtx);
             const { from, to, empty } = view.state.selection;
             if (empty) return;
-            // 按 Markdown 解析后替换选区，避免 **/# 等被当成纯文本
+            const cell = getSameTableCell(view.state.doc, from, to);
+            if (cell) {
+              let parser: ((md: string) => never) | undefined;
+              try {
+                parser = ctx.get(parserCtx) as never;
+              } catch {
+                parser = undefined;
+              }
+              ok = replaceTableCellInline(view, text, from, to, parser);
+              return;
+            }
+            if (selectionTouchesTable(view.state.doc, from, to)) {
+              ok = false;
+              return;
+            }
+            replaceRange(text, { from, to })(ctx);
+            ok = true;
+          });
+          return ok;
+        } catch {
+          return false;
+        }
+      },
+      replaceRangeAt: (from: number, to: number, text: string) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        if (from >= to) return false;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const max = view.state.doc.content.size;
+            if (from < 0 || to > max + 2) return;
+            const cell = getSameTableCell(view.state.doc, from, to);
+            if (cell) {
+              let parser: ((md: string) => never) | undefined;
+              try {
+                parser = ctx.get(parserCtx) as never;
+              } catch {
+                parser = undefined;
+              }
+              ok = replaceTableCellInline(view, text, from, to, parser);
+              return;
+            }
+            if (selectionTouchesTable(view.state.doc, from, to)) {
+              ok = false;
+              return;
+            }
             replaceRange(text, { from, to })(ctx);
             ok = true;
           });

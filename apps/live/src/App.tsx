@@ -47,6 +47,7 @@ import { ExportProgress } from "./components/ExportProgress";
 import { runExport } from "./export/runExport";
 import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
+import { prepareCellInlineText } from "./markdown/tableCellSelection";
 import type { OutlineHeading } from "./markdown/extractOutline";
 import {
   absKey,
@@ -70,7 +71,7 @@ const WELCOME = `# Lumen MD Live
 | 1.2 | 核心模块确定为 Rust: ime-ffi、Cargo workspace、cbindgen、Tokio 冷路径 |
 
 - 段落 → 表格，或 \`/\` → 表格，或输入 \`|3x3|\` 后空格
-- \`Ctrl+S\` 保存 · \`Ctrl+/\` 切换源代码 · \`Ctrl+W\` 关闭标签
+- \`Ctrl/⌘+S\` 保存 · \`Ctrl/⌘+/\` 切换源代码 · \`Ctrl/⌘+W\` 关闭标签
 `;
 
 function isMdPath(p: string) {
@@ -216,11 +217,65 @@ export default function App() {
   }, [sourceMode]);
 
   const applyAiResult = useCallback(
-    (text: string, replaceSelection: boolean, before?: string): boolean => {
+    (
+      text: string,
+      replaceSelection: boolean,
+      before?: string,
+      range?: {
+        from?: number;
+        to?: number;
+        inTableCell?: boolean;
+        tableSelectionBlocked?: boolean;
+      },
+    ): boolean => {
       if (replaceSelection) {
+        if (range?.tableSelectionBlocked) {
+          return false;
+        }
+
+        // 优先用保存的 from/to（对比弹窗会丢掉选区）
+        if (
+          !sourceMode &&
+          range?.from != null &&
+          range?.to != null &&
+          range.from < range.to
+        ) {
+          const ok = editorRef.current?.replaceRangeAt(
+            range.from,
+            range.to,
+            range.inTableCell ? prepareCellInlineText(text) : text,
+          );
+          if (ok) {
+            markDirtyFrom(currentEditorMarkdown());
+            return true;
+          }
+        }
+
+        const payload = range?.inTableCell
+          ? prepareCellInlineText(text)
+          : text;
+
         const ok = sourceMode
-          ? sourceRef.current?.replaceSelection(text)
-          : editorRef.current?.replaceSelection(text);
+          ? sourceRef.current?.replaceSelection(
+              // 源码模式：若原文在管道表行内，压平写回
+              (() => {
+                const md = markdownRef.current;
+                const idx = before ? md.indexOf(before) : -1;
+                if (idx >= 0) {
+                  const lineStart = md.lastIndexOf("\n", idx) + 1;
+                  const lineEnd = md.indexOf("\n", idx);
+                  const line = md.slice(
+                    lineStart,
+                    lineEnd < 0 ? md.length : lineEnd,
+                  );
+                  if (/^\s*\|/.test(line) && line.includes("|", 1)) {
+                    return prepareCellInlineText(text);
+                  }
+                }
+                return text;
+              })(),
+            )
+          : editorRef.current?.replaceSelection(payload);
         if (ok) {
           markDirtyFrom(currentEditorMarkdown());
           return true;
@@ -230,8 +285,18 @@ export default function App() {
           const md = currentEditorMarkdown();
           const idx = md.indexOf(before);
           if (idx >= 0) {
+            const lineStart = md.lastIndexOf("\n", idx) + 1;
+            const lineEnd = md.indexOf("\n", idx);
+            const line = md.slice(
+              lineStart,
+              lineEnd < 0 ? md.length : lineEnd,
+            );
+            const inPipeRow =
+              range?.inTableCell ||
+              (/^\s*\|/.test(line) && line.includes("|", 1));
+            const insert = inPipeRow ? prepareCellInlineText(text) : text;
             const next =
-              md.slice(0, idx) + text + md.slice(idx + before.length);
+              md.slice(0, idx) + insert + md.slice(idx + before.length);
             if (!sourceMode) editorRef.current?.setMarkdown(next);
             markDirtyFrom(next);
             return true;
@@ -262,7 +327,17 @@ export default function App() {
       setAiSelected(id);
       try {
         const md = currentEditorMarkdown();
-        const selection = getEditorSelection();
+        const selMeta = sourceMode
+          ? null
+          : editorRef.current?.getSelectionMeta() ?? null;
+        if (selMeta?.tableSelectionBlocked) {
+          const msg = "表内选区写回失败，请只选中同一单元格内的文字";
+          setStatus(msg);
+          setAiPanelStatus(msg);
+          return;
+        }
+        const selection =
+          selMeta?.text ?? getEditorSelection();
         const result = await runAiCapability({
           id,
           markdown: md,
@@ -277,6 +352,10 @@ export default function App() {
           after: result.text,
           replaceSelection: result.replaceSelection,
           warn: result.warn,
+          from: selMeta?.from,
+          to: selMeta?.to,
+          inTableCell: selMeta?.inTableCell,
+          tableSelectionBlocked: selMeta?.tableSelectionBlocked,
         });
         setAiImages([]);
         const msg = result.warn
@@ -305,6 +384,7 @@ export default function App() {
       currentEditorMarkdown,
       getEditorSelection,
       hasAiKey,
+      sourceMode,
       supportsMultimodal,
     ],
   );
@@ -809,7 +889,7 @@ export default function App() {
           break;
         case "about":
           window.alert(
-            "Lumen MD Live 0.1\n真所见即所得 Markdown 编辑器\n需要 Windows 10/11\nCtrl+/ 源码 · Ctrl+W 关闭标签",
+            "Lumen MD Live 0.1\n真所见即所得 Markdown 编辑器\n支持 Windows / macOS / Linux\nCtrl/⌘+/ 源码 · Ctrl/⌘+W 关闭标签",
           );
           break;
         default: {
@@ -940,10 +1020,17 @@ export default function App() {
             aiDiff.after,
             aiDiff.replaceSelection,
             aiDiff.before,
+            {
+              from: aiDiff.from,
+              to: aiDiff.to,
+              inTableCell: aiDiff.inTableCell,
+              tableSelectionBlocked: aiDiff.tableSelectionBlocked,
+            },
           );
           if (!ok) {
-            const msg =
-              "启用失败：原文已变化或找不到选区，请手动复制「处理后」内容";
+            const msg = aiDiff.tableSelectionBlocked
+              ? "表内选区写回失败，请只选中同一单元格内的文字"
+              : "启用失败：原文已变化或找不到选区，请手动复制「处理后」内容";
             setStatus(msg);
             setAiPanelStatus(msg);
             return;

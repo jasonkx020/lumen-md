@@ -6,6 +6,11 @@ export type AiDiffPreview = {
   after: string;
   replaceSelection: boolean;
   warn?: string;
+  /** Live 编辑器选区位置（对比弹窗会丢掉选区） */
+  from?: number;
+  to?: number;
+  inTableCell?: boolean;
+  tableSelectionBlocked?: boolean;
 };
 
 type Props = {
@@ -79,7 +84,7 @@ export function AiDiffModal({ preview, onAccept, onDiscard }: Props) {
         </div>
 
         <footer className="ai-diff-actions">
-          <span className="ai-diff-hint">Esc 丢弃 · Ctrl+Enter 启用</span>
+          <span className="ai-diff-hint">Esc 丢弃 · Ctrl/⌘+Enter 启用</span>
           <div className="ai-diff-buttons">
             <button type="button" onClick={onDiscard}>
               丢弃

@@ -4,6 +4,7 @@ import {
   getQuickCapabilities,
   type AiCapabilityId,
 } from "../ai/capabilities";
+import { platformShortcut } from "../platform";
 
 export type EditMenuAction = "cut" | "copy" | "paste" | "selectAll";
 
@@ -113,7 +114,9 @@ export function AiContextMenu({
         onClick={() => edit("cut")}
       >
         剪切
-        <span className="ai-context-shortcut">Ctrl+X</span>
+        <span className="ai-context-shortcut">
+          {platformShortcut("Ctrl+X")}
+        </span>
       </button>
       <button
         type="button"
@@ -122,7 +125,9 @@ export function AiContextMenu({
         onClick={() => edit("copy")}
       >
         复制
-        <span className="ai-context-shortcut">Ctrl+C</span>
+        <span className="ai-context-shortcut">
+          {platformShortcut("Ctrl+C")}
+        </span>
       </button>
       <button
         type="button"
@@ -130,7 +135,9 @@ export function AiContextMenu({
         onClick={() => edit("paste")}
       >
         粘贴
-        <span className="ai-context-shortcut">Ctrl+V</span>
+        <span className="ai-context-shortcut">
+          {platformShortcut("Ctrl+V")}
+        </span>
       </button>
       <button
         type="button"
@@ -138,7 +145,9 @@ export function AiContextMenu({
         onClick={() => edit("selectAll")}
       >
         全选
-        <span className="ai-context-shortcut">Ctrl+A</span>
+        <span className="ai-context-shortcut">
+          {platformShortcut("Ctrl+A")}
+        </span>
       </button>
 
       <div className="ai-context-sep" />

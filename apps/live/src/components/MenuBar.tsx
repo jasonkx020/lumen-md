@@ -3,6 +3,7 @@ import {
   extractOutline,
   type OutlineHeading,
 } from "../markdown/extractOutline";
+import { platformShortcut } from "../platform";
 import { THEMES, themeMenuAction, type ThemeId } from "../theme/androidStudio";
 
 export type MenuAction =
@@ -224,7 +225,9 @@ export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
                           {it.label}
                         </span>
                         {it.shortcut ? (
-                          <span className="shortcut">{it.shortcut}</span>
+                          <span className="shortcut">
+                            {platformShortcut(it.shortcut)}
+                          </span>
                         ) : null}
                       </button>
                     ),
@@ -244,7 +247,7 @@ export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
         <button
           type="button"
           className={"mode-toggle" + (sourceMode ? " is-on" : "")}
-          title="切换源代码模式 (Ctrl+/)"
+          title={`切换源代码模式 (${platformShortcut("Ctrl+/")})`}
           onClick={() => onAction("toggleSource")}
         >
           {sourceMode ? "Live 预览" : "源代码"}

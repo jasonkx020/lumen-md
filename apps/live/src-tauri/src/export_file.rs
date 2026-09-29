@@ -1,8 +1,8 @@
 //! Markdown → DOCX / PDF（GitHub 主题）。
 //!
 //! # PDF 策略
-//! 首选：GitHub 风 HTML → Edge/Chrome 打印（模式 `github-html`）。
-//! 回退：自研 DOCX → LibreOffice / Word COM。
+//! 首选：GitHub 风 HTML → Chrome/Chromium/Edge 打印（模式 `github-html`）。
+//! 回退：自研 DOCX → LibreOffice；Windows 另可回退 Word COM。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,11 +35,19 @@ fn tmp_export_dir() -> anyhow::Result<PathBuf> {
 }
 
 fn which_in_path(name: &str) -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
     let output = Command::new("where")
         .arg(name)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()?;
+    #[cfg(not(windows))]
+    let output = Command::new("sh")
+        .args(["-c", &format!("command -v {}", shell_escape(name))])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+
     if !output.status.success() {
         anyhow::bail!("not found");
     }
@@ -55,6 +63,18 @@ fn which_in_path(name: &str) -> anyhow::Result<PathBuf> {
         Ok(p)
     } else {
         anyhow::bail!("invalid")
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_escape(s: &str) -> String {
+    // PATH 查找名仅允许安全字符
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        s.to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -75,23 +95,51 @@ pub fn md_to_docx(markdown: &str, out_path: &Path) -> anyhow::Result<()> {
 }
 
 fn find_libreoffice() -> Option<PathBuf> {
-    let prog = std::env::var_os("PROGRAMFILES").map(PathBuf::from);
-    let prog86 = std::env::var_os("PROGRAMFILES(X86)").map(PathBuf::from);
     let mut candidates = Vec::new();
-    for root in [prog, prog86].into_iter().flatten() {
-        let base = root.join("LibreOffice").join("program");
-        candidates.push(base.join("soffice.com"));
-        candidates.push(base.join("soffice.exe"));
+
+    #[cfg(windows)]
+    {
+        let prog = std::env::var_os("PROGRAMFILES").map(PathBuf::from);
+        let prog86 = std::env::var_os("PROGRAMFILES(X86)").map(PathBuf::from);
+        for root in [prog, prog86].into_iter().flatten() {
+            let base = root.join("LibreOffice").join("program");
+            candidates.push(base.join("soffice.com"));
+            candidates.push(base.join("soffice.exe"));
+        }
+        for name in ["soffice.com", "soffice", "soffice.exe"] {
+            if let Ok(p) = which_in_path(name) {
+                candidates.push(p);
+            }
+        }
     }
-    if let Ok(p) = which_in_path("soffice.com") {
-        candidates.insert(0, p);
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from(
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ));
+        if let Ok(p) = which_in_path("soffice") {
+            candidates.insert(0, p);
+        }
     }
-    if let Ok(p) = which_in_path("soffice") {
-        candidates.push(p);
+
+    #[cfg(target_os = "linux")]
+    {
+        for p in [
+            "/usr/bin/soffice",
+            "/usr/bin/libreoffice",
+            "/usr/lib/libreoffice/program/soffice",
+            "/snap/bin/libreoffice",
+        ] {
+            candidates.push(PathBuf::from(p));
+        }
+        for name in ["soffice", "libreoffice"] {
+            if let Ok(p) = which_in_path(name) {
+                candidates.insert(0, p);
+            }
+        }
     }
-    if let Ok(p) = which_in_path("soffice.exe") {
-        candidates.push(p);
-    }
+
     candidates.into_iter().find(|p| p.is_file())
 }
 
@@ -218,7 +266,8 @@ fn pdf_looks_like_browser_ntp(bytes: &[u8]) -> bool {
         || ascii.contains("Search Google or type a URL")
 }
 
-/// Word COM：SaveAs2 → PDF。Quit 常抛 0x800706BE，以文件是否生成为准。
+/// Word COM：SaveAs2 → PDF（仅 Windows）。Quit 常抛 0x800706BE，以文件是否生成为准。
+#[cfg(windows)]
 fn docx_to_pdf_word_com(docx: &Path, out_pdf: &Path) -> anyhow::Result<()> {
     ensure_parent(out_pdf)?;
     let _ = fs::remove_file(out_pdf);
@@ -337,67 +386,120 @@ pub fn md_to_pdf(markdown: &str, out_path: &Path) -> anyhow::Result<PdfExportMod
     }
 
     let _ = fs::remove_file(&tmp_pdf);
-    match docx_to_pdf_word_com(&docx, &tmp_pdf) {
-        Ok(()) if pdf_looks_nonempty(&tmp_pdf) => {
-            fs::copy(&tmp_pdf, out_path)?;
-            let _ = fs::remove_dir_all(&dir);
-            return Ok("word");
-        }
-        Ok(()) => {
-            if !last_err.is_empty() {
-                last_err.push_str("; ");
+    #[cfg(windows)]
+    {
+        match docx_to_pdf_word_com(&docx, &tmp_pdf) {
+            Ok(()) if pdf_looks_nonempty(&tmp_pdf) => {
+                fs::copy(&tmp_pdf, out_path)?;
+                let _ = fs::remove_dir_all(&dir);
+                return Ok("word");
             }
-            last_err.push_str("Word 生成了空 PDF");
-        }
-        Err(e) => {
-            if !last_err.is_empty() {
-                last_err.push_str("; ");
+            Ok(()) => {
+                if !last_err.is_empty() {
+                    last_err.push_str("; ");
+                }
+                last_err.push_str("Word 生成了空 PDF");
             }
-            last_err.push_str(&format!("Word: {e}"));
+            Err(e) => {
+                if !last_err.is_empty() {
+                    last_err.push_str("; ");
+                }
+                last_err.push_str(&format!("Word: {e}"));
+            }
         }
     }
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_file(out_path);
     anyhow::bail!(
-        "PDF 导出失败：{last_err}。请确认已安装 Microsoft Edge，或 LibreOffice / Word。"
+        "PDF 导出失败：{last_err}。请确认已安装 Chrome / Chromium / Edge，或 LibreOffice。"
     );
 }
 
 fn browser_candidates() -> Vec<PathBuf> {
     let mut list = Vec::new();
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let prog = std::env::var_os("PROGRAMFILES").map(PathBuf::from);
-    let prog86 = std::env::var_os("PROGRAMFILES(X86)").map(PathBuf::from);
 
-    if let Some(la) = &local {
-        list.push(
-            la.join("Microsoft")
-                .join("Edge")
-                .join("Application")
-                .join("msedge.exe"),
-        );
-        list.push(
-            la.join("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe"),
-        );
+    #[cfg(windows)]
+    {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let prog = std::env::var_os("PROGRAMFILES").map(PathBuf::from);
+        let prog86 = std::env::var_os("PROGRAMFILES(X86)").map(PathBuf::from);
+
+        if let Some(la) = &local {
+            list.push(
+                la.join("Microsoft")
+                    .join("Edge")
+                    .join("Application")
+                    .join("msedge.exe"),
+            );
+            list.push(
+                la.join("Google")
+                    .join("Chrome")
+                    .join("Application")
+                    .join("chrome.exe"),
+            );
+        }
+        for root in [prog, prog86].into_iter().flatten() {
+            list.push(
+                root.join("Microsoft")
+                    .join("Edge")
+                    .join("Application")
+                    .join("msedge.exe"),
+            );
+            list.push(
+                root.join("Google")
+                    .join("Chrome")
+                    .join("Application")
+                    .join("chrome.exe"),
+            );
+        }
     }
-    for root in [prog, prog86].into_iter().flatten() {
-        list.push(
-            root.join("Microsoft")
-                .join("Edge")
-                .join("Application")
-                .join("msedge.exe"),
-        );
-        list.push(
-            root.join("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe"),
-        );
+
+    #[cfg(target_os = "macos")]
+    {
+        list.push(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ));
+        list.push(PathBuf::from(
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ));
+        list.push(PathBuf::from(
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ));
+        for name in ["google-chrome", "chromium", "microsoft-edge"] {
+            if let Ok(p) = which_in_path(name) {
+                list.push(p);
+            }
+        }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        for p in [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+            "/snap/bin/chromium",
+        ] {
+            list.push(PathBuf::from(p));
+        }
+        for name in [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "microsoft-edge",
+            "microsoft-edge-stable",
+        ] {
+            if let Ok(p) = which_in_path(name) {
+                list.insert(0, p);
+            }
+        }
+    }
+
     list
 }
 
@@ -463,7 +565,7 @@ fn html_to_pdf(html: &str, pdf_path: &Path) -> anyhow::Result<()> {
     let html_abs = strip_windows_verbatim(&fs::canonicalize(&html_path)?);
     let url = file_url(&html_abs);
     let tmp_pdf = tmp_dir.join("export.pdf");
-    let mut last_err = String::from("未找到可用的 Edge/Chrome");
+    let mut last_err = String::from("未找到可用的 Chrome/Chromium/Edge");
 
     for browser in browser_candidates() {
         if !browser.is_file() {
@@ -484,7 +586,7 @@ fn html_to_pdf(html: &str, pdf_path: &Path) -> anyhow::Result<()> {
 
     let _ = fs::remove_dir_all(&tmp_dir);
     anyhow::bail!(
-        "无法用 Edge/Chrome 生成 PDF（{}）。请确认已安装 Microsoft Edge。",
+        "无法用浏览器生成 PDF（{}）。请安装 Chrome / Chromium / Edge。",
         last_err
     );
 }

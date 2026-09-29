@@ -1,5 +1,6 @@
 export type AiCapabilityId =
   | "html_to_md"
+  | "md_to_html"
   | "polish"
   | "rewrite_selection"
   | "optimize_document"
@@ -48,6 +49,20 @@ export const AI_CAPABILITIES: AiCapability[] = [
 ${COMMON_TAIL}`,
   },
   {
+    id: "md_to_html",
+    label: "Markdown 转 HTML",
+    description: "将 Markdown 转为语义化 HTML 片段",
+    scope: "selection_preferred",
+    systemPrompt: `你是 HTML 转换助手。将用户给出的 Markdown 转为等价、语义清晰的 HTML。
+规则：
+- 使用标准标签：h1–h6、p、ul/ol/li、table、pre/code、blockquote、a、strong/em、hr 等
+- 保留标题层级、列表、表格、链接与强调；代码块用 <pre><code>
+- 不要输出 script、iframe、onclick、javascript: 等危险内容
+- 只输出 HTML 片段（不要 <!DOCTYPE> / <html> / <head> / <body> 外壳，除非用户明确要求完整页面）
+- 不要用 markdown 代码围栏包裹整篇输出
+${COMMON_TAIL}`,
+  },
+  {
     id: "polish",
     label: "润色",
     description: "润色选中文本（需选区）",
@@ -57,6 +72,7 @@ ${COMMON_TAIL}`,
 规则：
 - 不编造信息，不擅自增减关键论点
 - 尽量保持原有段落与标题层级
+- 若输入是表格单元格内的片段：只输出单行行内文本，不要空行、列表、标题或 \`|\` 管道符
 - 只输出润色后的文本
 ${COMMON_TAIL}`,
   },
@@ -70,6 +86,7 @@ ${COMMON_TAIL}`,
 规则：
 - 不改变核心事实
 - 可调整句式与小标题（若选区内有）
+- 若输入是表格单元格内的片段：只输出单行行内文本，不要空行、列表、标题或 \`|\` 管道符
 - 只输出重写后的文本，不要复述未选中部分
 ${COMMON_TAIL}`,
   },
@@ -83,6 +100,7 @@ ${COMMON_TAIL}`,
 规则：
 - 紧扣选区原意，不编造事实性细节
 - 保持 Markdown 结构；若选区是列表可扩成带说明的列表或连贯段落
+- 若输入是表格单元格内的片段：只输出单行行内文本（可稍长），不要空行、列表、标题或 \`|\` 管道符
 - 只输出扩写后的文本
 ${COMMON_TAIL}`,
   },
@@ -210,6 +228,8 @@ export function resolveCapabilityContent(
         : "未检测到明显 HTML，仍将尝试规范化";
       return { content: input.markdown, replaceSelection: false, warn };
     }
+    case "md_to_html":
+      return selectionPreferred(input);
     case "polish":
       return selectionOrThrow(sel, "请先选中要润色的文本");
     case "rewrite_selection":
