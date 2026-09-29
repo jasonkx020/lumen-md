@@ -122,6 +122,10 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [assetMode, setAssetMode] = useState("workspace");
+  const [assetsDir, setAssetsDir] = useState("assets");
+  const [userCss, setUserCss] = useState("");
+  const [restoreLastFolder, setRestoreLastFolder] = useState(false);
 
   const platformMeta =
     PLATFORMS.find((x) => x.id === platform) ?? PLATFORMS[0];
@@ -138,6 +142,10 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
         setPlatform(v.platform);
         setModel(v.model);
         setBaseUrl(v.baseUrl);
+        setAssetMode(v.assetMode || "workspace");
+        setAssetsDir(v.assetsDir || "assets");
+        setUserCss(v.userCss || "");
+        setRestoreLastFolder(!!v.restoreLastFolder);
         onChanged?.(v);
       })
       .catch((e) => setMsg(`读取设置失败: ${e}`));
@@ -155,6 +163,10 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
         model,
         baseUrl: baseUrl.trim() || null,
         apiKey: apiKey.trim() ? apiKey.trim() : null,
+        assetMode,
+        assetsDir: assetsDir.trim() || "assets",
+        userCss,
+        restoreLastFolder,
       });
       setView(v);
       setBaseUrl(v.baseUrl);
@@ -254,6 +266,49 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
             />
             <span>支持 HTML 标签预览与编辑</span>
           </label>
+          <label className="settings-row">
+            <input
+              type="checkbox"
+              checked={restoreLastFolder}
+              onChange={(e) => setRestoreLastFolder(e.target.checked)}
+            />
+            <span>启动时恢复上次打开的文件夹</span>
+          </label>
+          <label className="settings-field">
+            <span>图片落盘位置</span>
+            <select
+              value={assetMode}
+              onChange={(e) => setAssetMode(e.target.value)}
+            >
+              <option value="workspace">相对工作区根（assets/）</option>
+              <option value="beside">相对当前文档旁</option>
+            </select>
+          </label>
+          <label className="settings-field">
+            <span>资源目录名</span>
+            <input
+              type="text"
+              value={assetsDir}
+              onChange={(e) => setAssetsDir(e.target.value)}
+              placeholder="assets"
+              spellCheck={false}
+            />
+          </label>
+        </section>
+
+        <section className="settings-section">
+          <h3>自定义 CSS</h3>
+          <p className="settings-hint">
+            覆盖 `.markdown-body` / `.crepe-host` 等选择器；不保证 100% 兼容 Typora 主题。
+          </p>
+          <textarea
+            className="settings-css"
+            rows={8}
+            value={userCss}
+            onChange={(e) => setUserCss(e.target.value)}
+            placeholder={".crepe-host { font-size: 16px; }"}
+            spellCheck={false}
+          />
         </section>
 
         <section className="settings-section" id="settings-ai">

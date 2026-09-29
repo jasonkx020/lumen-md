@@ -524,6 +524,31 @@ body,
   caret-color: var(--text);
 }
 
+/* 图片默认居中（块级 image-block / 段落内单独图） */
+.crepe-host .ProseMirror .milkdown-image-block {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+
+.crepe-host .ProseMirror .milkdown-image-block img {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+}
+
+.crepe-host .ProseMirror p:has(> img:only-child),
+.crepe-host .ProseMirror p:has(> .milkdown-image-inline:only-child) {
+  text-align: center;
+}
+
+.crepe-host .ProseMirror p > img {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+}
+
 /* 表格：不依赖主题变量也能看清边框，并支持横向滚动编辑 */
 .crepe-host .ProseMirror .tableWrapper,
 .crepe-host .ProseMirror .milkdown-table-block {
@@ -595,40 +620,103 @@ body,
   height: 100%;
 }
 
-/* HTML-in-MD atom preview */
+/* HTML-in-MD：块级在 Shadow DOM 内渲染（不受下列规则影响） */
 .html-md-node {
   display: block;
-  margin: 0.6em 0;
-  padding: 8px 10px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  background: var(--bg-elev);
+  margin: 0.35em 0;
+  cursor: default;
+  line-height: 0; /* 块级原子：避免 ProseMirror 行高撑出额外空隙 */
+}
+
+.html-md-node.is-inline {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  line-height: inherit;
+}
+
+.html-md-node.is-block {
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 0;
+}
+
+.html-md-node.is-selected.is-block {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  border-radius: 4px;
+}
+
+/* 行内 html 预览（light DOM） */
+.html-md-body a[href] {
+  color: var(--accent, #0969da);
+  text-decoration: underline;
   cursor: pointer;
 }
 
-.html-md-node:hover {
-  border-color: var(--accent);
+.html-md-body img {
+  max-width: 100%;
+  height: auto;
+  width: auto;
+  vertical-align: middle;
 }
 
-.html-md-node.is-selected {
-  border-style: solid;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-
-.html-md-node .html-md-badge {
-  display: block;
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  margin-bottom: 4px;
-  font-family: var(--font-ui);
+.html-md-body a img {
+  border: 0;
 }
 
 .html-md-body {
   display: block;
   overflow: visible;
   max-width: 100%;
+}
+
+/* 独立 HTML 图默认居中 */
+.html-md-body > img,
+.html-md-body > picture,
+.html-md-body > a:has(> img):only-child {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Typora 对齐：flex 图墙等比缩成一行 + 图间距 */
+.html-md-body .lumen-html-flex,
+.html-md-body > div[style*="display: flex"],
+.html-md-body > div[style*="display:flex"] {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 0;
+}
+
+.html-md-body .lumen-html-flex > a,
+.html-md-body .lumen-html-flex > img,
+.html-md-body .lumen-html-flex > picture,
+.html-md-body > div[style*="display: flex"] > a,
+.html-md-body > div[style*="display:flex"] > a,
+.html-md-body > div[style*="display: flex"] > img,
+.html-md-body > div[style*="display:flex"] > img {
+  min-width: 0;
+  flex: 1 1 0;
+  margin: 0;
+  line-height: 0;
+}
+
+.html-md-body .lumen-html-flex img,
+.html-md-body > div[style*="display: flex"] img,
+.html-md-body > div[style*="display:flex"] img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  object-fit: contain;
+  vertical-align: top;
 }
 
 .html-md-body table {
@@ -1263,6 +1351,179 @@ button.primary:disabled {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* 查找替换 */
+.find-replace {
+  position: fixed;
+  top: calc(var(--menubar-h, 36px) + 8px);
+  right: 16px;
+  z-index: 90;
+  min-width: 280px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.find-replace-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.find-replace-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.find-replace-row button,
+.find-close {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.find-replace-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ws-search-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.ws-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  padding: 8px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ws-search-hit:hover {
+  background: var(--bg);
+}
+
+.ws-search-hit span {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-css {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+.front-matter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.front-matter-bar .fm-label {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.front-matter-bar .fm-title {
+  color: var(--text);
+}
+
+.front-matter-bar .fm-title.muted {
+  color: var(--muted);
+}
+
+.front-matter-bar .fm-tags {
+  opacity: 0.85;
+}
+
+/* 专注 / 打字机 */
+.crepe-host.is-focus .ProseMirror > *:not(:hover):not(.ProseMirror-selectednode) {
+  opacity: 0.42;
+  transition: opacity 0.18s ease;
+}
+
+.crepe-host.is-focus .ProseMirror > *:hover,
+.crepe-host.is-focus .ProseMirror-selectednode,
+.crepe-host.is-focus .ProseMirror > *.ProseMirror-selectednode {
+  opacity: 1;
+}
+
+.crepe-host.is-typewriter {
+  scroll-behavior: smooth;
+}
+
+.mermaid-chart {
+  margin: 0.75em 0;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.mermaid-source-collapsed {
+  display: none !important;
+}
+
+.mermaid-error {
+  color: #c62828;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* 脚注（源码 [^id] + 导出 HTML；Live 内若呈纯文本也可读） */
+.crepe-host .footnote-ref,
+.markdown-body .footnote-ref {
+  font-size: 0.75em;
+  vertical-align: super;
+}
+
+.crepe-host .footnotes,
+.markdown-body .footnotes {
+  margin-top: 2em;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5em;
+  font-size: 0.9em;
 }
 
 @media (max-width: 720px) {

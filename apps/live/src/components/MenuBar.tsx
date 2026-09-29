@@ -10,9 +10,12 @@ export type MenuAction =
   | "openFolder"
   | "openFile"
   | "save"
-  | "saveAsHint"
+  | "saveAs"
   | "exportPdf"
   | "exportDoc"
+  | "exportHtml"
+  | "exportImage"
+  | "copyHtml"
   | "newFile"
   | "quit"
   | "undo"
@@ -21,6 +24,11 @@ export type MenuAction =
   | "copy"
   | "paste"
   | "selectAll"
+  | "find"
+  | "findReplace"
+  | "insertToc"
+  | "insertFootnote"
+  | "workspaceSearch"
   | "heading1"
   | "heading2"
   | "heading3"
@@ -40,9 +48,12 @@ export type MenuAction =
   | "toggleSidebar"
   | "toggleOutline"
   | "toggleAiPanel"
+  | "toggleFocus"
+  | "toggleTypewriter"
   | `theme:${ThemeId}`
   | "openSettings"
-  | "about";
+  | "about"
+  | `recent:${string}`;
 
 type Item =
   | { type: "item"; label: string; action: MenuAction; shortcut?: string }
@@ -60,9 +71,13 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "新建 Markdown", action: "newFile" },
       { type: "sep" },
       { type: "item", label: "保存", action: "save", shortcut: "Ctrl+S" },
+      { type: "item", label: "另存为…", action: "saveAs" },
       { type: "sep" },
       { type: "item", label: "导出为 PDF…", action: "exportPdf" },
       { type: "item", label: "导出为 Word (.docx)…", action: "exportDoc" },
+      { type: "item", label: "导出为 HTML…", action: "exportHtml" },
+      { type: "item", label: "复制渲染 HTML", action: "copyHtml" },
+      { type: "item", label: "导出预览图…", action: "exportImage" },
       { type: "sep" },
       { type: "item", label: "退出", action: "quit" },
     ],
@@ -78,6 +93,12 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "复制", action: "copy", shortcut: "Ctrl+C" },
       { type: "item", label: "粘贴", action: "paste", shortcut: "Ctrl+V" },
       { type: "item", label: "全选", action: "selectAll", shortcut: "Ctrl+A" },
+      { type: "sep" },
+      { type: "item", label: "查找…", action: "find", shortcut: "Ctrl+F" },
+      { type: "item", label: "替换…", action: "findReplace", shortcut: "Ctrl+H" },
+      { type: "item", label: "工作区搜索…", action: "workspaceSearch" },
+      { type: "item", label: "插入/更新目录", action: "insertToc" },
+      { type: "item", label: "插入脚注", action: "insertFootnote" },
     ],
   },
   {
@@ -116,6 +137,8 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "侧边栏", action: "toggleSidebar" },
       { type: "item", label: "大纲", action: "toggleOutline" },
       { type: "item", label: "AI 助手", action: "toggleAiPanel" },
+      { type: "item", label: "专注模式", action: "toggleFocus" },
+      { type: "item", label: "打字机模式", action: "toggleTypewriter" },
     ],
   },
   {
@@ -146,9 +169,16 @@ type Props = {
   dirty: boolean;
   title: string;
   sourceMode: boolean;
+  recent?: { path: string; kind: string }[];
 };
 
-export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
+export function MenuBar({
+  onAction,
+  dirty,
+  title,
+  sourceMode,
+  recent = [],
+}: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
   const menusRef = useRef<HTMLElement>(null);
 
@@ -180,6 +210,21 @@ export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
       <nav className="menus" aria-label="主菜单" ref={menusRef}>
         {MENUS.map((m) => {
           const open = openId === m.id;
+          const items =
+            m.id === "file" && recent.length > 0
+              ? ([
+                  ...m.items.slice(0, -2),
+                  { type: "sep" as const },
+                  ...recent.slice(0, 8).map((r) => ({
+                    type: "item" as const,
+                    label:
+                      (r.kind === "folder" ? "📁 " : "") +
+                      (r.path.split(/[/\\]/).pop() || r.path),
+                    action: `recent:${r.path}` as MenuAction,
+                  })),
+                  ...m.items.slice(-2),
+                ] as Item[])
+              : m.items;
           return (
             <div
               className={"menu" + (open ? " is-open" : "")}
@@ -202,7 +247,7 @@ export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
               </button>
               {open ? (
                 <div className="menu-dropdown" role="menu">
-                  {m.items.map((it, i) =>
+                  {items.map((it, i) =>
                     it.type === "sep" ? (
                       <div className="menu-sep" key={`s-${i}`} />
                     ) : (
@@ -214,8 +259,13 @@ export function MenuBar({ onAction, dirty, title, sourceMode }: Props) {
                             ? " is-checked"
                             : "")
                         }
-                        key={it.action + it.label}
+                        key={String(it.action) + it.label}
                         role="menuitem"
+                        title={
+                          String(it.action).startsWith("recent:")
+                            ? String(it.action).slice(7)
+                            : undefined
+                        }
                         onClick={() => runItem(it.action)}
                       >
                         <span>

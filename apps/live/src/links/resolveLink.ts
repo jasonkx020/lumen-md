@@ -126,3 +126,19 @@ export function findAnchorFromEvent(target: EventTarget | null): string | null {
   }
   return null;
 }
+
+/** 支持 Shadow DOM（块级 HTML 预览）：从 composedPath 取真实 <a>。 */
+export function findAnchorFromMouseEvent(e: Event): string | null {
+  const path =
+    typeof e.composedPath === "function" ? e.composedPath() : [];
+  for (const n of path) {
+    if (!(n instanceof HTMLElement) || n.tagName !== "A") continue;
+    const href =
+      n.getAttribute("href") ||
+      n.dataset.href ||
+      n.getAttribute("data-link") ||
+      "";
+    if (href) return href;
+  }
+  return findAnchorFromEvent(e.target);
+}

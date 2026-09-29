@@ -13,6 +13,7 @@ import {
   settingsGet,
   settingsSet,
   takeStartupFiles,
+  markdownToHtmlString,
   type SettingsView,
 } from "./api";
 import type { AiCapabilityId } from "./ai/capabilities";
@@ -30,6 +31,7 @@ import {
 } from "./components/AiDiffModal";
 import { AiPanel, type AiPanelHandle } from "./components/AiPanel";
 import { CrepeEditor, type CrepeEditorHandle } from "./components/CrepeEditor";
+import { setHtmlAssetDocAbs } from "./markdown/htmlAssetContext";
 import { FileTree } from "./components/FileTree";
 import {
   MenuBar,
@@ -44,10 +46,14 @@ import {
 } from "./components/SourceEditor";
 import { TabBar } from "./components/TabBar";
 import { ExportProgress } from "./components/ExportProgress";
+import { FindReplace } from "./components/FindReplace";
+import { WorkspaceSearchModal } from "./components/WorkspaceSearchModal";
 import { runExport } from "./export/runExport";
 import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
 import { prepareCellInlineText } from "./markdown/tableCellSelection";
+import { countWords, footnoteHintCss, nextFootnoteRef, splitFrontMatter, upsertToc } from "./chrome/docUtils";
+import { importAssetPath, isImagePath } from "./assets/saveAsset";
 import type { OutlineHeading } from "./markdown/extractOutline";
 import {
   absKey,
@@ -116,6 +122,13 @@ export default function App() {
   const [hasAiKey, setHasAiKey] = useState(false);
   const [aiKeyInvalid, setAiKeyInvalid] = useState(false);
   const [supportsMultimodal, setSupportsMultimodal] = useState(false);
+  const [recent, setRecent] = useState<{ path: string; kind: string }[]>([]);
+  const [focusMode, setFocusMode] = useState(false);
+  const [typewriterMode, setTypewriterMode] = useState(false);
+  const [userCss, setUserCss] = useState("");
+  const [findOpen, setFindOpen] = useState(false);
+  const [findReplaceMode, setFindReplaceMode] = useState(false);
+  const [wsSearchOpen, setWsSearchOpen] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSelected, setAiSelected] =
     useState<AiCapabilityId>("optimize_document");
@@ -136,7 +149,6 @@ export default function App() {
 
   const applySettingsView = useCallback((v: SettingsView) => {
     setHtmlEnabled(v.htmlEnabled);
-    // Ollama 等本地平台无需 Key；云平台仍要求 Key
     setHasAiKey(v.requiresApiKey ? v.hasKey : true);
     if (!v.requiresApiKey || v.hasKey) setAiKeyInvalid(false);
     setSupportsMultimodal(!!v.supportsMultimodal);
@@ -145,7 +157,38 @@ export default function App() {
       setAiSelected((id) => (id === "image_to_md" ? "optimize_document" : id));
     }
     if (v.theme) setTheme(parseThemeId(v.theme));
+    setRecent(v.recent ?? []);
+    setFocusMode(!!v.focusMode);
+    setTypewriterMode(!!v.typewriterMode);
+    setUserCss(v.userCss ?? "");
   }, []);
+
+  useEffect(() => {
+    let el = document.getElementById("lumen-user-css") as HTMLStyleElement | null;
+    if (!el) {
+      el = document.createElement("style");
+      el.id = "lumen-user-css";
+      document.head.appendChild(el);
+    }
+    el.textContent = `${footnoteHintCss()}\n${userCss}`;
+  }, [userCss]);
+
+  useEffect(() => {
+    void settingsGet()
+      .then(async (v) => {
+        applySettingsView(v);
+        if (v.restoreLastFolder && v.lastFolder) {
+          try {
+            const root = await openWorkspace(v.lastFolder);
+            setWorkspaceRoot(root);
+            setTreeKey((k) => k + 1);
+          } catch {
+            /* ignore */
+          }
+        }
+      })
+      .catch(() => {});
+  }, [applySettingsView]);
 
   const applyTheme = useCallback((id: ThemeId) => {
     setTheme(id);
@@ -154,18 +197,27 @@ export default function App() {
     });
   }, []);
 
-  useEffect(() => {
-    void settingsGet()
-      .then(applySettingsView)
-      .catch(() => {
-        /* 非 tauri 预览 */
-      });
-  }, [applySettingsView]);
-
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const dirty = activeTab?.dirty ?? false;
   const title = activeTab?.title ?? "未命名";
   const activeRel = activeTab?.relPath ?? null;
+  const resolveDocAbs = useCallback(
+    (tab: { absPath?: string | null; relPath?: string | null } | null | undefined) => {
+      if (!tab) return null;
+      if (tab.absPath) return tab.absPath;
+      if (workspaceRoot && tab.relPath) {
+        return `${workspaceRoot.replace(/[/\\]+$/, "")}/${tab.relPath}`.replace(
+          /\//g,
+          "\\",
+        );
+      }
+      return null;
+    },
+    [workspaceRoot],
+  );
+  const activeDocAbs = resolveDocAbs(activeTab);
+  const wordStats = countWords(markdown);
+  const frontMatter = splitFrontMatter(markdown);
 
   const currentEditorMarkdown = useCallback(() => {
     if (sourceMode) return markdownRef.current;
@@ -190,11 +242,16 @@ export default function App() {
     return next;
   }, [currentEditorMarkdown]);
 
-  const loadTabIntoEditor = useCallback((tab: EditorTab) => {
-    markdownRef.current = tab.content;
-    setMarkdown(tab.content);
-    editorRef.current?.setMarkdown(tab.content);
-  }, []);
+  const loadTabIntoEditor = useCallback(
+    (tab: EditorTab) => {
+      // 必须在 setMarkdown 前同步文档路径，否则 HTML 相对图按空路径解析会裂图
+      setHtmlAssetDocAbs(resolveDocAbs(tab));
+      markdownRef.current = tab.content;
+      setMarkdown(tab.content);
+      editorRef.current?.setMarkdown(tab.content);
+    },
+    [resolveDocAbs],
+  );
 
   const markDirtyFrom = useCallback((md: string) => {
     markdownRef.current = md;
@@ -210,6 +267,18 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const applyMarkdownReplace = useCallback(
+    (next: string) => {
+      markdownRef.current = next;
+      setMarkdown(next);
+      markDirtyFrom(next);
+      if (!sourceMode) {
+        editorRef.current?.setMarkdown(next);
+      }
+    },
+    [markDirtyFrom, sourceMode],
+  );
 
   const getEditorSelection = useCallback(() => {
     if (sourceMode) return sourceRef.current?.getSelection() ?? null;
@@ -669,6 +738,36 @@ export default function App() {
   const handleDropPath = useCallback(
     async (path: string) => {
       try {
+        if (isImagePath(path)) {
+          const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+          const docAbs =
+            tab?.absPath ??
+            (workspaceRoot && tab?.relPath
+              ? `${workspaceRoot.replace(/[/\\]+$/, "")}/${tab.relPath}`.replace(
+                  /\//g,
+                  "\\",
+                )
+              : null);
+          const rel = await importAssetPath(path, docAbs);
+          const alt =
+            path
+              .split(/[/\\]/)
+              .pop()
+              ?.replace(/\.[^.]+$/, "") ?? "image";
+          if (sourceMode) {
+            const md = currentEditorMarkdown();
+            const snippet = `\n\n![${alt}](${rel})\n`;
+            applyMarkdownReplace(md + snippet);
+          } else {
+            const ok = editorRef.current?.insertImageSrc(rel, alt);
+            if (!ok) {
+              const md = currentEditorMarkdown();
+              applyMarkdownReplace(`${md}\n\n![${alt}](${rel})\n`);
+            }
+          }
+          setStatus(`已插入图片 ${rel}`);
+          return;
+        }
         if (isMdPath(path)) {
           const res = await openAbsoluteFile(path);
           if (res.mode === "workspace" && res.rel_path) {
@@ -684,10 +783,16 @@ export default function App() {
           setStatus(`工作区: ${root}`);
         }
       } catch (e) {
-        setStatus(`拖放打开失败: ${e}`);
+        setStatus(`拖放失败: ${e}`);
       }
     },
-    [openOrFocusTab],
+    [
+      applyMarkdownReplace,
+      currentEditorMarkdown,
+      openOrFocusTab,
+      sourceMode,
+      workspaceRoot,
+    ],
   );
 
   // 系统「打开方式」/ 命令行传入的文件：冷启动 + 二次实例
@@ -750,19 +855,23 @@ export default function App() {
     });
   }, []);
 
-  const doExport = useCallback(async (kind: "pdf" | "docx") => {
+  const doExport = useCallback(async (kind: "pdf" | "docx" | "html") => {
     try {
       const md = currentEditorMarkdown();
       markdownRef.current = md;
-      setStatus(kind === "pdf" ? "正在导出 PDF…" : "正在导出 Word…");
+      const labels = {
+        pdf: "正在导出 PDF…",
+        docx: "正在导出 Word…",
+        html: "正在导出 HTML…",
+      } as const;
+      setStatus(labels[kind]);
       const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
-      const label =
-        kind === "pdf" ? "正在导出 PDF…" : "正在导出 Word…";
       const result = await runExport({
         kind,
         markdown: md,
         defaultName: tab?.title ?? "export",
-        onWorkStart: () => exportProgress.start(label),
+        docAbs: resolveDocAbs(tab),
+        onWorkStart: () => exportProgress.start(labels[kind]),
       });
       if (result === "cancelled") {
         exportProgress.fail();
@@ -770,16 +879,110 @@ export default function App() {
         return;
       }
       await exportProgress.finish();
-      if (kind === "docx") {
-        setStatus("已导出 Word (.docx)");
-        return;
-      }
-      setStatus("已导出 PDF");
+      setStatus(
+        kind === "docx"
+          ? "已导出 Word (.docx)"
+          : kind === "html"
+            ? "已导出 HTML"
+            : "已导出 PDF",
+      );
     } catch (e) {
       exportProgress.fail();
       setStatus(`导出失败: ${e}`);
     }
-  }, [currentEditorMarkdown, exportProgress.start, exportProgress.finish, exportProgress.fail]);
+  }, [
+    currentEditorMarkdown,
+    resolveDocAbs,
+    exportProgress.start,
+    exportProgress.finish,
+    exportProgress.fail,
+  ]);
+
+  const doSaveAs = useCallback(async () => {
+    flushActiveToTabs();
+    const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (!tab) return;
+    const md = tab.content;
+    try {
+      const selected = await save({
+        filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+        defaultPath: `${tab.title === "欢迎" ? "untitled" : tab.title}.md`,
+      });
+      if (!selected) return;
+      const abs = await registerAndWriteAbs(selected, md);
+      const upgraded: EditorTab = {
+        ...tab,
+        key: absKey(abs),
+        title: abs.replace(/\\/g, "/").split("/").pop() || tab.title,
+        content: md,
+        savedContent: md,
+        dirty: false,
+        absPath: abs,
+        relPath: undefined,
+      };
+      const next = tabsRef.current.map((t) =>
+        t.id === tab.id ? upgraded : t,
+      );
+      tabsRef.current = next;
+      setTabs(next);
+      setStatus(`已另存为 ${upgraded.title}`);
+    } catch (e) {
+      setStatus(`另存为失败: ${e}`);
+    }
+  }, [flushActiveToTabs]);
+
+  const jumpFindHit = useCallback(
+    (index: number, len: number) => {
+      if (sourceMode) {
+        sourceRef.current?.selectRange?.(index, index + len);
+        return;
+      }
+      editorRef.current?.selectTextNear?.(index, len);
+    },
+    [sourceMode],
+  );
+
+  const insertOrUpdateToc = useCallback(() => {
+    const md = currentEditorMarkdown();
+    const next = upsertToc(md);
+    applyMarkdownReplace(next);
+    setStatus("已插入/更新目录");
+  }, [applyMarkdownReplace, currentEditorMarkdown]);
+
+  const openRecentPath = useCallback(
+    async (path: string, kind: string) => {
+      try {
+        if (kind === "folder") {
+          const root = await openWorkspace(path);
+          setWorkspaceRoot(root);
+          setTreeKey((k) => k + 1);
+          setStatus(`工作区: ${root}`);
+          return;
+        }
+        const res = await openAbsoluteFile(path);
+        if (res.mode === "workspace" && res.rel_path) {
+          openOrFocusTab(createWorkspaceTab(res.rel_path, res.content));
+        } else if (res.abs_path) {
+          openOrFocusTab(createStandaloneTab(res.abs_path, res.content));
+        }
+      } catch (e) {
+        setStatus(`打开失败: ${e}`);
+      }
+    },
+    [openOrFocusTab],
+  );
+
+  const copyRenderedHtml = useCallback(async () => {
+    try {
+      const md = currentEditorMarkdown();
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      const html = await markdownToHtmlString(md, resolveDocAbs(tab));
+      await navigator.clipboard.writeText(html);
+      setStatus("已复制渲染 HTML");
+    } catch (e) {
+      setStatus(`复制失败: ${e}`);
+    }
+  }, [currentEditorMarkdown, resolveDocAbs]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -825,6 +1028,20 @@ export default function App() {
         e.preventDefault();
         if (activeIdRef.current) closeTab(activeIdRef.current);
       }
+      if (mod && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFindReplaceMode(false);
+        setFindOpen(true);
+      }
+      if (mod && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        setFindReplaceMode(true);
+        setFindOpen(true);
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setWsSearchOpen(true);
+      }
       if (mod && (e.key === "/" || e.code === "Slash" || e.key === "?")) {
         e.preventDefault();
         toggleSourceMode();
@@ -850,6 +1067,12 @@ export default function App() {
 
   const onAction = useCallback(
     (action: MenuAction) => {
+      if (String(action).startsWith("recent:")) {
+        const path = String(action).slice("recent:".length);
+        const entry = recent.find((r) => r.path === path);
+        void openRecentPath(path, entry?.kind ?? "file");
+        return;
+      }
       switch (action) {
         case "openFolder":
           void openFolderDialog();
@@ -860,11 +1083,61 @@ export default function App() {
         case "save":
           void doSave();
           break;
+        case "saveAs":
+          void doSaveAs();
+          break;
         case "exportPdf":
           void doExport("pdf");
           break;
         case "exportDoc":
           void doExport("docx");
+          break;
+        case "exportHtml":
+          void doExport("html");
+          break;
+        case "exportImage":
+          void doExport("html").then(() => {
+            setStatus("已导出 HTML；可用浏览器打开后截长图");
+          });
+          break;
+        case "copyHtml":
+          void copyRenderedHtml();
+          break;
+        case "find":
+          setFindReplaceMode(false);
+          setFindOpen(true);
+          break;
+        case "findReplace":
+          setFindReplaceMode(true);
+          setFindOpen(true);
+          break;
+        case "workspaceSearch":
+          setWsSearchOpen(true);
+          break;
+        case "insertToc":
+          insertOrUpdateToc();
+          break;
+        case "insertFootnote": {
+          const md = currentEditorMarkdown();
+          const { ref, def } = nextFootnoteRef(md);
+          const next = `${md}${md.endsWith("\n") ? "" : "\n"}${ref}\n\n${def}\n`;
+          applyMarkdownReplace(next);
+          setStatus(`已插入脚注 ${ref}（可在源码中编辑定义）`);
+          break;
+        }
+        case "toggleFocus":
+          setFocusMode((v) => {
+            const next = !v;
+            void settingsSet({ focusMode: next }).catch(() => {});
+            return next;
+          });
+          break;
+        case "toggleTypewriter":
+          setTypewriterMode((v) => {
+            const next = !v;
+            void settingsSet({ typewriterMode: next }).catch(() => {});
+            return next;
+          });
           break;
         case "newFile":
           void newFile();
@@ -907,11 +1180,18 @@ export default function App() {
     },
     [
       applyTheme,
+      applyMarkdownReplace,
+      copyRenderedHtml,
+      currentEditorMarkdown,
       doExport,
       doSave,
+      doSaveAs,
+      insertOrUpdateToc,
       newFile,
       openFileDialog,
       openFolderDialog,
+      openRecentPath,
+      recent,
       sourceMode,
       toggleSourceMode,
     ],
@@ -924,6 +1204,7 @@ export default function App() {
         dirty={dirty}
         title={title}
         sourceMode={sourceMode}
+        recent={recent}
       />
       <TabBar
         tabs={tabs}
@@ -943,6 +1224,19 @@ export default function App() {
           </aside>
         ) : null}
         <main className="editor-pane">
+          {frontMatter ? (
+            <div className="front-matter-bar" title={frontMatter.raw}>
+              <span className="fm-label">YAML</span>
+              {frontMatter.title ? (
+                <span className="fm-title">{frontMatter.title}</span>
+              ) : (
+                <span className="fm-title muted">front matter</span>
+              )}
+              {frontMatter.tags ? (
+                <span className="fm-tags">{frontMatter.tags}</span>
+              ) : null}
+            </div>
+          ) : null}
           <div
             className={sourceMode ? "editor-layer is-hidden" : "editor-layer"}
           >
@@ -953,7 +1247,11 @@ export default function App() {
               onChange={markDirtyFrom}
               onLinkClick={onEditorLinkClick}
               onContextMenu={onEditorContextMenu}
+              onAssetError={(msg) => setStatus(`图片失败: ${msg}`)}
               htmlEnabled={htmlEnabled}
+              docAbsPath={activeDocAbs}
+              focusMode={focusMode}
+              typewriterMode={typewriterMode}
               className="crepe-host"
             />
           </div>
@@ -1000,8 +1298,34 @@ export default function App() {
         <span className="status-mode">
           {sourceMode ? "源代码" : "Live"}
           {tabs.length > 1 ? ` · ${tabs.length} 标签` : ""}
+          {focusMode ? " · 专注" : ""}
+          {typewriterMode ? " · 打字机" : ""}
+          {` · ${wordStats.words} 词 · ${wordStats.chars} 字 · ~${wordStats.readingMin} 分钟`}
         </span>
       </footer>
+      <FindReplace
+        open={findOpen}
+        replaceMode={findReplaceMode}
+        onClose={() => setFindOpen(false)}
+        getText={() => currentEditorMarkdown()}
+        onJump={jumpFindHit}
+        onReplaceAll={applyMarkdownReplace}
+        onReplaceOne={(from, to, text) => {
+          const md = currentEditorMarkdown();
+          applyMarkdownReplace(md.slice(0, from) + text + md.slice(to));
+        }}
+      />
+      <WorkspaceSearchModal
+        open={wsSearchOpen}
+        onClose={() => setWsSearchOpen(false)}
+        onOpen={(rel, line) => {
+          void openWorkspaceFile(rel).then(() => {
+            window.setTimeout(() => {
+              sourceRef.current?.scrollToLine(line);
+            }, 80);
+          });
+        }}
+      />
       <ExportProgress
         visible={exportProgress.visible}
         percent={exportProgress.percent}

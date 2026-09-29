@@ -54,6 +54,13 @@ function promoteHtmlTables() {
           if (table) reps.push({ from: pos, to: pos + node.nodeSize, table });
           return;
         }
+        if (node.type.name === "html_block") {
+          const value = String(node.attrs.value ?? "");
+          if (!isTableHtml(value)) return;
+          const table = htmlToPmTable(schema, value);
+          if (table) reps.push({ from: pos, to: pos + node.nodeSize, table });
+          return;
+        }
         if (node.type.name === "html") {
           const value = String(node.attrs.value ?? "");
           if (!isTableHtml(value)) return;

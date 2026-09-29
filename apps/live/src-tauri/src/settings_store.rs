@@ -128,6 +128,22 @@ fn normalize_theme(s: &str) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecentEntry {
+    pub path: String,
+    /// "file" | "folder"
+    pub kind: String,
+}
+
+fn default_assets_dir() -> String {
+    "assets".into()
+}
+
+fn default_asset_mode() -> String {
+    "workspace".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Prefs {
     pub html_enabled: bool,
     pub platform: LlmPlatform,
@@ -137,6 +153,23 @@ pub struct Prefs {
     /// 非空时覆盖平台默认 Base URL（主要用于 Ollama 改端口/远程）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub recent: Vec<RecentEntry>,
+    #[serde(default)]
+    pub focus_mode: bool,
+    #[serde(default)]
+    pub typewriter_mode: bool,
+    /// workspace | beside
+    #[serde(default = "default_asset_mode")]
+    pub asset_mode: String,
+    #[serde(default = "default_assets_dir")]
+    pub assets_dir: String,
+    #[serde(default)]
+    pub user_css: String,
+    #[serde(default)]
+    pub restore_last_folder: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_folder: Option<String>,
 }
 
 impl Default for Prefs {
@@ -148,6 +181,14 @@ impl Default for Prefs {
             model: platform.default_model().into(),
             theme: default_theme(),
             base_url: None,
+            recent: Vec::new(),
+            focus_mode: false,
+            typewriter_mode: false,
+            asset_mode: default_asset_mode(),
+            assets_dir: default_assets_dir(),
+            user_css: String::new(),
+            restore_last_folder: false,
+            last_folder: None,
         }
     }
 }
@@ -161,6 +202,12 @@ pub struct SettingsSetReq {
     pub api_key: Option<String>,
     pub theme: Option<String>,
     pub base_url: Option<String>,
+    pub focus_mode: Option<bool>,
+    pub typewriter_mode: Option<bool>,
+    pub asset_mode: Option<String>,
+    pub assets_dir: Option<String>,
+    pub user_css: Option<String>,
+    pub restore_last_folder: Option<bool>,
 }
 
 fn config_dir() -> anyhow::Result<PathBuf> {
@@ -346,6 +393,14 @@ pub struct SettingsView {
     pub theme: String,
     pub requires_api_key: bool,
     pub supports_multimodal: bool,
+    pub recent: Vec<RecentEntry>,
+    pub focus_mode: bool,
+    pub typewriter_mode: bool,
+    pub asset_mode: String,
+    pub assets_dir: String,
+    pub user_css: String,
+    pub restore_last_folder: bool,
+    pub last_folder: Option<String>,
 }
 
 pub fn settings_view() -> SettingsView {
@@ -360,7 +415,36 @@ pub fn settings_view() -> SettingsView {
         theme: normalize_theme(&prefs.theme),
         requires_api_key: prefs.platform.requires_api_key(),
         supports_multimodal: model_supports_vision(prefs.platform, &prefs.model),
+        recent: prefs.recent.clone(),
+        focus_mode: prefs.focus_mode,
+        typewriter_mode: prefs.typewriter_mode,
+        asset_mode: prefs.asset_mode.clone(),
+        assets_dir: prefs.assets_dir.clone(),
+        user_css: prefs.user_css.clone(),
+        restore_last_folder: prefs.restore_last_folder,
+        last_folder: prefs.last_folder.clone(),
     }
+}
+
+pub fn push_recent(path: &str, kind: &str) {
+    let mut prefs = load_prefs();
+    let path = path.trim();
+    if path.is_empty() {
+        return;
+    }
+    prefs.recent.retain(|e| e.path != path);
+    prefs.recent.insert(
+        0,
+        RecentEntry {
+            path: path.to_string(),
+            kind: kind.to_string(),
+        },
+    );
+    prefs.recent.truncate(20);
+    if kind == "folder" {
+        prefs.last_folder = Some(path.to_string());
+    }
+    let _ = save_prefs(&prefs);
 }
 
 pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
@@ -381,11 +465,8 @@ pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
             {
                 prefs.model = platform.default_model().into();
             }
-            // 切换平台时清掉与新区不符的自定义 URL（非 Ollama 一般用官方地址）
             if !matches!(platform, LlmPlatform::Ollama) {
                 prefs.base_url = None;
-            } else if prefs.base_url.is_none() {
-                // 保留空，使用默认；用户可在设置里改
             }
         }
     }
@@ -400,6 +481,30 @@ pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
     }
     if let Some(bu) = req.base_url.as_deref() {
         prefs.base_url = normalize_base_url_input(bu, prefs.platform);
+    }
+    if let Some(v) = req.focus_mode {
+        prefs.focus_mode = v;
+    }
+    if let Some(v) = req.typewriter_mode {
+        prefs.typewriter_mode = v;
+    }
+    if let Some(m) = req.asset_mode.as_deref() {
+        let m = m.trim().to_lowercase();
+        if m == "workspace" || m == "beside" {
+            prefs.asset_mode = m;
+        }
+    }
+    if let Some(d) = req.assets_dir.as_deref() {
+        let t = d.trim().trim_matches('/').trim_matches('\\');
+        if !t.is_empty() && !t.contains("..") {
+            prefs.assets_dir = t.to_string();
+        }
+    }
+    if let Some(css) = req.user_css {
+        prefs.user_css = css.chars().take(200_000).collect();
+    }
+    if let Some(v) = req.restore_last_folder {
+        prefs.restore_last_folder = v;
     }
     save_prefs(&prefs)?;
 

@@ -1,5 +1,7 @@
 //! Lumen MD Live — Tauri 命令与沙箱 FS IPC。
 
+mod assets_fs;
+mod export_assets;
 mod export_file;
 mod html_sanitize;
 mod html_table_docx;
@@ -53,6 +55,7 @@ fn open_workspace(state: State<'_, AppState>, path: String) -> Result<String, St
     let ws = Workspace::open(&path).map_err(map_err)?;
     let root = ws.root().to_string_lossy().into_owned();
     *state.workspace.lock() = Some(ws);
+    settings_store::push_recent(&root, "folder");
     Ok(root)
 }
 
@@ -122,11 +125,13 @@ fn open_absolute_file(
     // 独立文件：加入白名单，不打开父目录为工作区
     let content = read_abs_text(&canon).map_err(map_err)?;
     state.allowed_abs.lock().insert(canon.clone());
+    let abs_s = canon.to_string_lossy().into_owned();
+    settings_store::push_recent(&abs_s, "file");
     Ok(OpenFileResult {
         mode: "standalone".into(),
         workspace_root: None,
         rel_path: None,
-        abs_path: Some(canon.to_string_lossy().into_owned()),
+        abs_path: Some(abs_s),
         content,
     })
 }
@@ -154,9 +159,26 @@ fn fs_write_abs(
     write_abs_text(&canon, &content).map_err(map_err)
 }
 
+fn export_ctx_from_state(
+    state: &AppState,
+    doc_abs: Option<String>,
+) -> export_assets::ExportAssetCtx {
+    let workspace_root = state
+        .workspace
+        .lock()
+        .as_ref()
+        .map(|ws| ws.root().to_string_lossy().into_owned());
+    export_assets::ExportAssetCtx::from_opts(doc_abs.as_deref(), workspace_root.as_deref())
+}
+
 /// Markdown → DOCX（纯 Rust：comrak + docx-rs）。
 #[tauri::command]
-fn export_md_to_docx(markdown: String, path: String) -> Result<(), String> {
+fn export_md_to_docx(
+    state: State<'_, AppState>,
+    markdown: String,
+    path: String,
+    doc_abs: Option<String>,
+) -> Result<(), String> {
     let p = PathBuf::from(&path);
     let lower = p
         .extension()
@@ -165,12 +187,18 @@ fn export_md_to_docx(markdown: String, path: String) -> Result<(), String> {
     if lower != "docx" {
         return Err("目标路径须为 .docx".into());
     }
-    export_file::md_to_docx(&markdown, &p).map_err(map_err)
+    let ctx = export_ctx_from_state(&state, doc_abs);
+    export_file::md_to_docx_with_ctx(&markdown, &p, &ctx).map_err(map_err)
 }
 
 /// Markdown → PDF（首选 GitHub HTML；回退 DOCX→Word/LO；返回模式 github-html|libreoffice|word）。
 #[tauri::command]
-fn export_md_to_pdf(markdown: String, path: String) -> Result<String, String> {
+fn export_md_to_pdf(
+    state: State<'_, AppState>,
+    markdown: String,
+    path: String,
+    doc_abs: Option<String>,
+) -> Result<String, String> {
     let p = PathBuf::from(&path);
     let lower = p
         .extension()
@@ -179,7 +207,8 @@ fn export_md_to_pdf(markdown: String, path: String) -> Result<String, String> {
     if lower != "pdf" {
         return Err("目标路径须为 .pdf".into());
     }
-    export_file::md_to_pdf(&markdown, &p)
+    let ctx = export_ctx_from_state(&state, doc_abs);
+    export_file::md_to_pdf_with_ctx(&markdown, &p, &ctx)
         .map(|mode| mode.to_string())
         .map_err(map_err)
 }
@@ -481,6 +510,281 @@ async fn llm_complete(
     llm::complete(&system, &user, temperature, images).await
 }
 
+/// Markdown → HTML（GitHub 风 standalone）。
+#[tauri::command]
+fn export_md_to_html(
+    state: State<'_, AppState>,
+    markdown: String,
+    path: String,
+    doc_abs: Option<String>,
+) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let lower = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if lower != "html" && lower != "htm" {
+        return Err("目标路径须为 .html".into());
+    }
+    let ctx = export_ctx_from_state(&state, doc_abs);
+    let html = md_docx::markdown_to_github_html_with_ctx(&markdown, &ctx).map_err(map_err)?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, html.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Markdown → HTML 字符串（剪贴板复制用）。
+#[tauri::command]
+fn markdown_to_html_string(
+    state: State<'_, AppState>,
+    markdown: String,
+    doc_abs: Option<String>,
+) -> Result<String, String> {
+    let ctx = export_ctx_from_state(&state, doc_abs);
+    md_docx::markdown_to_github_html_with_ctx(&markdown, &ctx).map_err(map_err)
+}
+
+/// 保存图片等二进制资源。bytesBase64 为原始字节的 base64。
+#[tauri::command]
+fn fs_save_asset(
+    state: State<'_, AppState>,
+    bytes_base64: String,
+    preferred_name: Option<String>,
+    mime_hint: Option<String>,
+    doc_abs: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_base64.trim())
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    let prefs = settings_store::load_prefs();
+    let sub = prefs.assets_dir.clone();
+    let mode = prefs.asset_mode.clone();
+
+    if mode == "beside" {
+        let doc = doc_abs
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "相对文档落盘需要当前文件路径".to_string())?;
+        let (rel, abs) = assets_fs::save_beside_doc(
+            Path::new(doc),
+            &bytes,
+            preferred_name.as_deref(),
+            mime_hint.as_deref(),
+            &sub,
+        )
+        .map_err(map_err)?;
+        state.allowed_abs.lock().insert(abs);
+        return Ok(rel);
+    }
+
+    // workspace 优先
+    let guard = state.workspace.lock();
+    if let Some(ws) = guard.as_ref() {
+        return assets_fs::save_in_workspace(
+            ws,
+            &bytes,
+            preferred_name.as_deref(),
+            mime_hint.as_deref(),
+            &sub,
+        )
+        .map_err(map_err);
+    }
+    // 无工作区时尝试 beside
+    let doc = doc_abs
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "请先打开工作区或已保存的文档再插入图片".to_string())?;
+    let (rel, abs) = assets_fs::save_beside_doc(
+        Path::new(doc),
+        &bytes,
+        preferred_name.as_deref(),
+        mime_hint.as_deref(),
+        &sub,
+    )
+    .map_err(map_err)?;
+    drop(guard);
+    state.allowed_abs.lock().insert(abs);
+    Ok(rel)
+}
+
+/// 从本机绝对路径导入图片到 assets，返回相对路径。
+#[tauri::command]
+fn fs_import_asset_path(
+    state: State<'_, AppState>,
+    abs_path: String,
+    doc_abs: Option<String>,
+) -> Result<String, String> {
+    let p = PathBuf::from(abs_path.trim());
+    if !p.is_file() {
+        return Err("不是有效的图片文件".into());
+    }
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    let name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned());
+    let mime = match p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => Some("image/jpeg".into()),
+        "gif" => Some("image/gif".into()),
+        "webp" => Some("image/webp".into()),
+        "svg" => Some("image/svg+xml".into()),
+        "png" => Some("image/png".into()),
+        _ => None,
+    };
+    // 复用 fs_save_asset 的落盘策略
+    use base64::Engine;
+    let bytes_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    fs_save_asset(state, bytes_base64, name, mime, doc_abs)
+}
+
+/// 将工作区相对路径图片读为 data URL（供编辑器预览）。
+#[tauri::command]
+fn resolve_asset_url(
+    state: State<'_, AppState>,
+    src: String,
+    doc_abs: Option<String>,
+) -> Result<String, String> {
+    let src = src.trim();
+    if src.is_empty() {
+        return Err("空路径".into());
+    }
+    if src.starts_with("data:") || src.starts_with("http://") || src.starts_with("https://") {
+        return Ok(src.to_string());
+    }
+    let path = if Path::new(src).is_absolute() {
+        PathBuf::from(src)
+    } else {
+        // Typora 语义：相对路径优先相对当前 md 所在目录
+        let from_doc = doc_abs
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|doc| {
+                Path::new(doc)
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(src)
+            });
+        if let Some(ref p) = from_doc {
+            if p.is_file() {
+                p.clone()
+            } else {
+                // 回退工作区根（assets/ 等）
+                let from_ws = {
+                    let guard = state.workspace.lock();
+                    guard
+                        .as_ref()
+                        .and_then(|ws| ws.resolve(src).ok())
+                        .filter(|p| p.is_file())
+                };
+                from_ws
+                    .or_else(|| from_doc)
+                    .ok_or_else(|| "未打开工作区且无文档路径，无法解析图片".to_string())?
+            }
+        } else {
+            let guard = state.workspace.lock();
+            let ws = guard
+                .as_ref()
+                .ok_or_else(|| "未打开工作区且无文档路径，无法解析图片".to_string())?;
+            ws.resolve(src).map_err(map_err)?
+        }
+    };
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    };
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchHit {
+    rel_path: String,
+    line: usize,
+    preview: String,
+}
+
+#[tauri::command]
+fn workspace_search(
+    state: State<'_, AppState>,
+    query: String,
+    max_hits: Option<usize>,
+) -> Result<Vec<SearchHit>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = max_hits.unwrap_or(100).min(500);
+    with_ws(&state, |ws| {
+        let mut hits = Vec::new();
+        let mut stack = vec![ws.root().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for ent in rd.flatten() {
+                let path = ent.path();
+                let name = ent.file_name().to_string_lossy().into_owned();
+                if name == ".git" || name == "node_modules" || name == "target" {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !(name.ends_with(".md")
+                    || name.ends_with(".markdown")
+                    || name.ends_with(".txt"))
+                {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let rel = path
+                    .strip_prefix(ws.root())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| name.clone());
+                for (i, line) in text.lines().enumerate() {
+                    if line.contains(q) {
+                        hits.push(SearchHit {
+                            rel_path: rel.clone(),
+                            line: i + 1,
+                            preview: line.chars().take(160).collect(),
+                        });
+                        if hits.len() >= limit {
+                            return Ok(hits);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    })
+}
+
 #[allow(dead_code)]
 fn default_prefs() -> Prefs {
     Prefs::default()
@@ -614,6 +918,12 @@ pub fn run() {
             register_and_write_abs,
             export_md_to_docx,
             export_md_to_pdf,
+            export_md_to_html,
+            markdown_to_html_string,
+            fs_save_asset,
+            fs_import_asset_path,
+            resolve_asset_url,
+            workspace_search,
             resolve_doc_link,
             settings_get,
             settings_set,

@@ -89,6 +89,14 @@ export type SettingsView = {
   theme: string;
   requiresApiKey: boolean;
   supportsMultimodal: boolean;
+  recent: { path: string; kind: string }[];
+  focusMode: boolean;
+  typewriterMode: boolean;
+  assetMode: string;
+  assetsDir: string;
+  userCss: string;
+  restoreLastFolder: boolean;
+  lastFolder: string | null;
 };
 
 export async function settingsGet(): Promise<SettingsView> {
@@ -102,8 +110,13 @@ export async function settingsSet(args: {
   apiKey?: string | null;
   theme?: string;
   baseUrl?: string | null;
+  focusMode?: boolean;
+  typewriterMode?: boolean;
+  assetMode?: string;
+  assetsDir?: string;
+  userCss?: string | null;
+  restoreLastFolder?: boolean;
 }): Promise<SettingsView> {
-  // 单一 req 对象，避免 Optional 扁平参数在 IPC 中丢失 apiKey
   return invoke("settings_set", {
     req: {
       htmlEnabled: args.htmlEnabled ?? null,
@@ -112,6 +125,12 @@ export async function settingsSet(args: {
       apiKey: args.apiKey ?? null,
       theme: args.theme ?? null,
       baseUrl: args.baseUrl ?? null,
+      focusMode: args.focusMode ?? null,
+      typewriterMode: args.typewriterMode ?? null,
+      assetMode: args.assetMode ?? null,
+      assetsDir: args.assetsDir ?? null,
+      userCss: args.userCss ?? null,
+      restoreLastFolder: args.restoreLastFolder ?? null,
     },
   });
 }
@@ -127,16 +146,64 @@ export async function llmTest(): Promise<string> {
 export async function exportMdToDocx(
   markdown: string,
   path: string,
+  docAbs?: string | null,
 ): Promise<void> {
-  return invoke("export_md_to_docx", { markdown, path });
+  return invoke("export_md_to_docx", {
+    markdown,
+    path,
+    docAbs: docAbs ?? null,
+  });
 }
 
 /** 返回转换模式：github-html | libreoffice | word | html-fallback */
 export async function exportMdToPdf(
   markdown: string,
   path: string,
+  docAbs?: string | null,
 ): Promise<string> {
-  return invoke("export_md_to_pdf", { markdown, path });
+  return invoke("export_md_to_pdf", {
+    markdown,
+    path,
+    docAbs: docAbs ?? null,
+  });
+}
+
+export async function exportMdToHtml(
+  markdown: string,
+  path: string,
+  docAbs?: string | null,
+): Promise<void> {
+  return invoke("export_md_to_html", {
+    markdown,
+    path,
+    docAbs: docAbs ?? null,
+  });
+}
+
+export async function markdownToHtmlString(
+  markdown: string,
+  docAbs?: string | null,
+): Promise<string> {
+  return invoke("markdown_to_html_string", {
+    markdown,
+    docAbs: docAbs ?? null,
+  });
+}
+
+export type SearchHit = {
+  relPath: string;
+  line: number;
+  preview: string;
+};
+
+export async function workspaceSearch(
+  query: string,
+  maxHits?: number,
+): Promise<SearchHit[]> {
+  return invoke("workspace_search", {
+    query,
+    maxHits: maxHits ?? 100,
+  });
 }
 
 export async function llmComplete(args: {

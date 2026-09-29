@@ -1,66 +1,30 @@
-/** Typora 风格 HTML-in-MD 消毒：白名单标签/属性，剥离脚本与事件。 */
+/**
+ * HTML-in-MD 消毒：以 WebView2 原生解析为准。
+ * 仅剥离 XSS 向量（script/事件/javascript:），不把合法标签/属性砍成窄白名单。
+ */
 
-const ALLOWED_TAGS = new Set([
-  "br",
-  "p",
-  "div",
-  "span",
-  "section",
-  "details",
-  "summary",
-  "kbd",
-  "mark",
-  "u",
-  "sub",
-  "sup",
-  "font",
-  "center",
-  "table",
-  "thead",
-  "tbody",
-  "tr",
-  "th",
-  "td",
-  "img",
-  "a",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "h5",
-  "h6",
-  "ul",
-  "ol",
-  "li",
-  "blockquote",
-  "hr",
-  "pre",
-  "code",
-  "em",
-  "strong",
-  "b",
-  "i",
-  "small",
-]);
+import { markFlexContainers } from "./enhanceHtml";
 
-const VOID_TAGS = new Set(["br", "hr", "img"]);
+const VOID_TAGS = new Set(["br", "hr", "img", "source", "wbr", "col", "area", "base", "meta", "link"]);
 
-const ALLOWED_ATTRS = new Set([
-  "href",
-  "src",
-  "alt",
-  "title",
-  "class",
-  "id",
-  "style",
-  "colspan",
-  "rowspan",
-  "open",
-  "color",
-  "size",
-  "align",
-  "width",
-  "height",
+/** 绝对禁止：可执行 / 导航劫持 / 表单控件（编辑器内不当） */
+const FORBIDDEN_TAGS = new Set([
+  "script",
+  "iframe",
+  "object",
+  "embed",
+  "link",
+  "meta",
+  "style", // 外联/内联 <style> 块；元素 style 属性仍保留
+  "base",
+  "form",
+  "input",
+  "button",
+  "textarea",
+  "select",
+  "option",
+  "svg", // 简化：避免 foreignObject/script；GitHub README 图墙不依赖 svg 标签
+  "math",
 ]);
 
 function isSafeUrl(value: string, kind: "href" | "src"): boolean {
@@ -76,11 +40,15 @@ function isSafeUrl(value: string, kind: "href" | "src"): boolean {
   }
   if (kind === "src") {
     if (lower.startsWith("data:image/")) return true;
-    if (lower.startsWith("http://") || lower.startsWith("https://")) return false;
+    if (lower.startsWith("http://") || lower.startsWith("https://")) return true;
+    if (lower.startsWith("blob:")) return true;
     return !lower.includes("://") || lower.startsWith("asset:");
   }
-  // href
-  if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("mailto:")) {
+  if (
+    lower.startsWith("http://") ||
+    lower.startsWith("https://") ||
+    lower.startsWith("mailto:")
+  ) {
     return true;
   }
   if (lower.startsWith("#")) return true;
@@ -88,31 +56,27 @@ function isSafeUrl(value: string, kind: "href" | "src"): boolean {
 }
 
 function sanitizeStyle(style: string): string {
-  // 去掉 expression / url(javascript) 等
-  const cleaned = style
+  // 只去掉可执行 CSS；完整保留 flex/grid/writing-mode 等布局声明（交给 WebView2）
+  return style
     .replace(/expression\s*\(/gi, "")
     .replace(/url\s*\(\s*['"]?\s*javascript:/gi, "url(")
-    .replace(/-moz-binding/gi, "");
-  return cleaned.slice(0, 400);
+    .replace(/-moz-binding/gi, "")
+    .replace(/behavior\s*:/gi, "")
+    .replace(/-o-link\s*:/gi, "")
+    .slice(0, 4000);
 }
 
 function sanitizeElement(el: Element): void {
   const tag = el.tagName.toLowerCase();
-  if (!ALLOWED_TAGS.has(tag)) {
-    // 用文本内容替换危险节点
-    const text = document.createTextNode(el.textContent ?? "");
-    el.replaceWith(text);
+  if (FORBIDDEN_TAGS.has(tag)) {
+    el.remove();
     return;
   }
 
-  // 去掉事件与未知属性
+  // 保留 WebView2 能解析的任意安全标签；只清危险属性
   for (const attr of Array.from(el.attributes)) {
     const name = attr.name.toLowerCase();
-    if (name.startsWith("on") || name === "srcdoc") {
-      el.removeAttribute(attr.name);
-      continue;
-    }
-    if (!ALLOWED_ATTRS.has(name)) {
+    if (name.startsWith("on") || name === "srcdoc" || name === "xlink:href") {
       el.removeAttribute(attr.name);
       continue;
     }
@@ -120,13 +84,17 @@ function sanitizeElement(el: Element): void {
       el.removeAttribute(attr.name);
       continue;
     }
-    if (name === "src" && !isSafeUrl(attr.value, "src")) {
+    if (
+      (name === "src" || name === "srcset") &&
+      !isSafeUrl(attr.value.split(/[\s,]+/)[0] ?? "", "src")
+    ) {
       el.removeAttribute(attr.name);
       continue;
     }
     if (name === "style") {
       el.setAttribute("style", sanitizeStyle(attr.value));
     }
+    // 其它属性（class/id/width/target/data-* / aria-* …）原样保留
   }
 
   for (const child of Array.from(el.children)) {
@@ -134,17 +102,20 @@ function sanitizeElement(el: Element): void {
   }
 }
 
-/** 将原始 HTML 消毒为可安全 innerHTML 的字符串。 */
+/**
+ * 用 WebView2/Chromium 的 HTML 解析器（template.innerHTML）解析，
+ * 仅做 XSS 擦除后写回。
+ */
 export function sanitizeHtml(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
 
-  // 单独 void 标签
   const voidOnly = /^<(br|hr)\s*\/?>$/i.exec(trimmed);
   if (voidOnly) {
     return `<${voidOnly[1]!.toLowerCase()}>`;
   }
 
+  // WebView2 原生解析
   const template = document.createElement("template");
   template.innerHTML = trimmed;
 
@@ -152,10 +123,11 @@ export function sanitizeHtml(raw: string): string {
     sanitizeElement(child);
   }
 
-  // 清理残留 script/style/iframe
   template.content
-    .querySelectorAll("script,iframe,object,embed,link,meta")
+    .querySelectorAll("script,iframe,object,embed,link,meta,base,style")
     .forEach((n) => n.remove());
+
+  markFlexContainers(template.content);
 
   return template.innerHTML;
 }

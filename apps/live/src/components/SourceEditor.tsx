@@ -22,6 +22,7 @@ import {
   foldGutter,
   foldKeymap,
 } from "@codemirror/language";
+import { searchKeymap, highlightSelectionMatches, search } from "@codemirror/search";
 import {
   DEFAULT_THEME,
   themeIsDark,
@@ -30,6 +31,7 @@ import {
 
 export type SourceEditorHandle = {
   scrollToLine: (line: number) => void;
+  selectRange: (from: number, to: number) => void;
   focus: () => void;
   getSelection: () => string | null;
   replaceSelection: (text: string) => boolean;
@@ -67,6 +69,18 @@ export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
         view.dispatch({
           selection: { anchor: lineObj.from },
           effects: EditorView.scrollIntoView(lineObj.from, { y: "start" }),
+        });
+        view.focus();
+      },
+      selectRange: (from: number, to: number) => {
+        const view = viewRef.current;
+        if (!view) return;
+        const max = view.state.doc.length;
+        const a = Math.max(0, Math.min(from, max));
+        const b = Math.max(a, Math.min(to, max));
+        view.dispatch({
+          selection: { anchor: a, head: b },
+          effects: EditorView.scrollIntoView(a, { y: "center" }),
         });
         view.focus();
       },
@@ -148,11 +162,14 @@ export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
           bracketMatching(),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           markdown(),
+          search(),
+          highlightSelectionMatches(),
           EditorView.lineWrapping,
           keymap.of([
             ...defaultKeymap,
             ...historyKeymap,
             ...foldKeymap,
+            ...searchKeymap,
             indentWithTab,
           ]),
           onUpdate,

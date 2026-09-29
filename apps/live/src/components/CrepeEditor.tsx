@@ -7,20 +7,39 @@ import {
 import { Crepe } from "@milkdown/crepe";
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
+import type { Node as PmNode, Schema } from "@milkdown/kit/prose/model";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import { replaceAll, replaceRange } from "@milkdown/kit/utils";
+import { upload, uploadConfig } from "@milkdown/kit/plugin/upload";
 import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
-import { htmlPreviewView } from "../markdown/htmlNodes";
+import { normalizeGithubHtml } from "../markdown/normalizeGithubHtml";
+import {
+  decodeImageAltFromCrepe,
+  encodeImageAltForCrepe,
+} from "../markdown/crepeImageAlt";
+import {
+  htmlBlockPreviewView,
+  htmlPreviewView,
+} from "../markdown/htmlNodes";
+import {
+  htmlBlockSchema,
+  remarkHtmlBlock,
+} from "../markdown/htmlBlockNodes";
+import { remarkMergeInlineHtml } from "../markdown/remarkMergeInlineHtml";
 import {
   htmlTablePromotePlugin,
   serializeMarkdownPreservingHtmlTables,
 } from "../markdown/htmlTablePromote";
+import { rewriteHtmlImgSrcs } from "../markdown/rewriteHtmlAssets";
 import {
   getSameTableCell,
   replaceTableCellInline,
   selectionTouchesTable,
 } from "../markdown/tableCellSelection";
-import { findAnchorFromEvent } from "../links/resolveLink";
+import { resolveAssetUrl, saveAssetFile } from "../assets/saveAsset";
+import { setHtmlAssetDocAbs } from "../markdown/htmlAssetContext";
+import { attachMermaidRenderer } from "../diagrams/mermaidView";
+import { findAnchorFromMouseEvent } from "../links/resolveLink";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 import "@milkdown/prose/tables/style/tables.css";
@@ -47,6 +66,10 @@ export type CrepeEditorHandle = {
   replaceSelection: (text: string) => boolean;
   /** 用保存的 from/to 写回（对比弹窗会丢掉选区） */
   replaceRangeAt: (from: number, to: number, text: string) => boolean;
+  /** 按纯文本偏移近似选中（查找用） */
+  selectTextNear: (index: number, len: number) => void;
+  /** 在光标处插入相对路径图片（拖入用） */
+  insertImageSrc: (src: string, alt?: string) => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -55,12 +78,43 @@ type Props = {
   onChange?: (md: string) => void;
   onLinkClick?: (href: string) => void;
   onContextMenu?: (e: MouseEvent) => void;
+  /** 图片落盘/解析失败时回调（状态栏） */
+  onAssetError?: (msg: string) => void;
   htmlEnabled?: boolean;
+  /** 当前文档绝对路径（图片 beside 模式 / 资源解析） */
+  docAbsPath?: string | null;
+  focusMode?: boolean;
+  typewriterMode?: boolean;
   className?: string;
 };
 
+function createImageNodes(schema: Schema, src: string, alt: string): PmNode[] {
+  const block = schema.nodes["image-block"];
+  if (block) {
+    const n = block.createAndFill({ src, caption: alt || "", ratio: 1 });
+    if (n) return [n];
+  }
+  const image = schema.nodes.image;
+  if (image) {
+    const n = image.createAndFill({ src, alt: alt || "" });
+    if (n) return [n];
+  }
+  return [];
+}
+
+function normalizeIncomingMarkdown(md: string): string {
+  return encodeImageAltForCrepe(
+    normalizeGithubHtml(normalizeGfmTables(md)),
+  );
+}
+
+/** 面向源码/保存的 Markdown（还原 image-block 弄丢的 alt） */
+function normalizeOutgoingMarkdown(md: string): string {
+  return decodeImageAltFromCrepe(md);
+}
+
 function applyMarkdown(crepe: Crepe, md: string) {
-  crepe.editor.action(replaceAll(normalizeGfmTables(md), true));
+  crepe.editor.action(replaceAll(normalizeIncomingMarkdown(md), true));
 }
 
 export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
@@ -70,7 +124,11 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
       onChange,
       onLinkClick,
       onContextMenu,
+      onAssetError,
       htmlEnabled = true,
+      docAbsPath = null,
+      focusMode = false,
+      typewriterMode = false,
       className,
     },
     ref,
@@ -78,27 +136,48 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
     const rootRef = useRef<HTMLDivElement>(null);
     const crepeRef = useRef<Crepe | null>(null);
     const readyRef = useRef(false);
-    const lastMdRef = useRef(normalizeGfmTables(initialMarkdown));
+    const lastMdRef = useRef(
+      normalizeGithubHtml(normalizeGfmTables(initialMarkdown)),
+    );
     const onChangeRef = useRef(onChange);
     const onLinkClickRef = useRef(onLinkClick);
     const onContextMenuRef = useRef(onContextMenu);
+    const onAssetErrorRef = useRef(onAssetError);
+    const docAbsRef = useRef(docAbsPath);
     const suppressRef = useRef(0);
     onChangeRef.current = onChange;
     onLinkClickRef.current = onLinkClick;
     onContextMenuRef.current = onContextMenu;
+    onAssetErrorRef.current = onAssetError;
+    docAbsRef.current = docAbsPath;
+    setHtmlAssetDocAbs(docAbsPath);
+
+    const uploadFileRef = useRef<(file: File) => Promise<string>>(async () => {
+      throw new Error("upload not ready");
+    });
+    uploadFileRef.current = async (file: File): Promise<string> => {
+      try {
+        return await saveAssetFile(file, { docAbs: docAbsRef.current });
+      } catch (e) {
+        onAssetErrorRef.current?.(String(e));
+        throw e;
+      }
+    };
 
     useImperativeHandle(ref, () => ({
       getMarkdown: () => {
         const c = crepeRef.current;
         if (c && readyRef.current) {
           try {
+            let raw: string;
             if (htmlEnabled) {
               c.editor.action((ctx: Ctx) => {
-                lastMdRef.current = serializeMarkdownPreservingHtmlTables(ctx);
+                raw = serializeMarkdownPreservingHtmlTables(ctx);
               });
             } else {
-              lastMdRef.current = c.getMarkdown();
+              raw = c.getMarkdown();
             }
+            lastMdRef.current = normalizeOutgoingMarkdown(raw!);
           } catch {
             /* keep last */
           }
@@ -106,16 +185,21 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         return lastMdRef.current;
       },
       setMarkdown: (md: string) => {
-        const normalized = normalizeGfmTables(md);
-        lastMdRef.current = normalized;
+        // 打开文件时父组件可能同步调用 setMarkdown，早于本次 render；
+        // 用 ref 再刷一次上下文，避免相对图片按错误/空文档路径解析。
+        setHtmlAssetDocAbs(docAbsRef.current);
+        const base = normalizeGithubHtml(normalizeGfmTables(md));
+        lastMdRef.current = base;
         const c = crepeRef.current;
         if (!c || !readyRef.current) return;
         suppressRef.current += 1;
         try {
-          applyMarkdown(c, normalized);
+          applyMarkdown(c, base);
         } finally {
           setTimeout(() => {
             suppressRef.current = Math.max(0, suppressRef.current - 1);
+            const host = rootRef.current;
+            if (host) void rewriteHtmlImgSrcs(host, docAbsRef.current);
           }, 0);
         }
       },
@@ -283,6 +367,63 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           el?.scrollIntoView({ behavior: "smooth", block: "start" });
         }
       },
+      selectTextNear: (index: number, len: number) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return;
+        try {
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { state } = view;
+            const text = state.doc.textContent;
+            const start = Math.max(0, Math.min(index, text.length));
+            const end = Math.max(start, Math.min(start + Math.max(0, len), text.length));
+            // map plain offsets → doc positions
+            let plain = 0;
+            let fromPos: number | null = null;
+            let toPos: number | null = null;
+            state.doc.descendants((node, pos) => {
+              if (!node.isText || !node.text) return;
+              const next = plain + node.text.length;
+              if (fromPos == null && start >= plain && start <= next) {
+                fromPos = pos + (start - plain);
+              }
+              if (toPos == null && end >= plain && end <= next) {
+                toPos = pos + (end - plain);
+              }
+              plain = next;
+              if (fromPos != null && toPos != null) return false;
+            });
+            if (fromPos == null) return;
+            const $from = state.doc.resolve(fromPos);
+            const $to = state.doc.resolve(toPos ?? fromPos);
+            const sel = TextSelection.between($from, $to);
+            view.dispatch(state.tr.setSelection(sel).scrollIntoView());
+            view.focus();
+          });
+        } catch {
+          /* ignore */
+        }
+      },
+      insertImageSrc: (src: string, alt = "") => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const nodes = createImageNodes(view.state.schema, src, alt);
+            if (nodes.length === 0) return;
+            const { from } = view.state.selection;
+            const tr = view.state.tr.replaceWith(from, from, nodes);
+            view.dispatch(tr.scrollIntoView());
+            view.focus();
+            ok = true;
+          });
+          return ok;
+        } catch {
+          return false;
+        }
+      },
     }));
 
     useEffect(() => {
@@ -302,6 +443,30 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           [Crepe.Feature.Placeholder]: {
             text: "开始写作…",
             mode: "block",
+          },
+          [Crepe.Feature.ImageBlock]: {
+            onUpload: async (file: File) => uploadFileRef.current(file),
+            inlineOnUpload: async (file: File) => uploadFileRef.current(file),
+            blockOnUpload: async (file: File) => uploadFileRef.current(file),
+            proxyDomURL: async (url: string) => {
+              if (
+                !url ||
+                url.startsWith("data:") ||
+                url.startsWith("http://") ||
+                url.startsWith("https://") ||
+                url.startsWith("blob:")
+              ) {
+                return url;
+              }
+              try {
+                return await resolveAssetUrl(url, docAbsRef.current);
+              } catch (e) {
+                onAssetErrorRef.current?.(String(e));
+                return url;
+              }
+            },
+            blockUploadPlaceholderText: "上传图片到 assets/",
+            inlineUploadPlaceholderText: "上传图片",
           },
           [Crepe.Feature.BlockEdit]: {
             textGroup: {
@@ -332,8 +497,45 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           },
         },
       });
+      crepe.editor
+        .config((ctx) => {
+          ctx.update(uploadConfig.key, (prev) => ({
+            ...prev,
+            enableHtmlFileUploader: true,
+            uploader: async (files, schema) => {
+              const imgs: File[] = [];
+              for (let i = 0; i < files.length; i++) {
+                const f = files.item(i);
+                if (f && f.type.includes("image")) imgs.push(f);
+              }
+              const nodes: PmNode[] = [];
+              for (const file of imgs) {
+                try {
+                  const src = await uploadFileRef.current(file);
+                  nodes.push(
+                    ...createImageNodes(
+                      schema,
+                      src,
+                      file.name.replace(/\.[^.]+$/, "") || "image",
+                    ),
+                  );
+                } catch {
+                  /* onAssetError already notified */
+                }
+              }
+              return nodes;
+            },
+          }));
+        })
+        .use(upload);
       if (htmlEnabled) {
-        crepe.editor.use(htmlPreviewView).use(htmlTablePromotePlugin);
+        crepe.editor
+          .use(htmlBlockSchema)
+          .use(remarkMergeInlineHtml)
+          .use(remarkHtmlBlock)
+          .use(htmlPreviewView)
+          .use(htmlBlockPreviewView)
+          .use(htmlTablePromotePlugin);
       }
       crepe.on((listener) => {
         listener.markdownUpdated((ctx, markdown) => {
@@ -346,6 +548,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
               /* fall back to milkdown markdown */
             }
           }
+          next = normalizeOutgoingMarkdown(next);
           lastMdRef.current = next;
           onChangeRef.current?.(next);
         });
@@ -363,14 +566,25 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           }, 0);
         }
       });
+      const detachMermaid = attachMermaidRenderer(el);
       return () => {
         disposed = true;
         readyRef.current = false;
+        detachMermaid();
         void crepe.destroy();
         crepeRef.current = null;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [htmlEnabled]);
+
+    // 文档路径变化后重写相对图片（打开文件 / 切换 Tab）
+    useEffect(() => {
+      setHtmlAssetDocAbs(docAbsPath);
+      docAbsRef.current = docAbsPath;
+      const host = rootRef.current;
+      if (!host || !readyRef.current) return;
+      void rewriteHtmlImgSrcs(host, docAbsPath);
+    }, [docAbsPath]);
 
     useEffect(() => {
       const el = rootRef.current;
@@ -384,7 +598,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         if (t?.closest?.(".milkdown-toolbar, .milkdown-slash-menu, .crepe-menu")) {
           return;
         }
-        const href = findAnchorFromEvent(e.target);
+        const href = findAnchorFromMouseEvent(e);
         if (!href) return;
         e.preventDefault();
         onLinkClickRef.current?.(href);
@@ -405,6 +619,48 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
       };
     }, []);
 
-    return <div ref={rootRef} className={className ?? "crepe-host"} />;
+    useEffect(() => {
+      if (!typewriterMode) return;
+      const c = crepeRef.current;
+      if (!c || !readyRef.current) return;
+      let last = -1;
+      const tick = () => {
+        try {
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const head = view.state.selection.head;
+            if (head === last) return;
+            last = head;
+            const coords = view.coordsAtPos(head);
+            if (!coords) return;
+            const host = rootRef.current;
+            if (!host) return;
+            const rect = host.getBoundingClientRect();
+            const targetY = rect.top + rect.height * 0.4;
+            const delta = coords.top - targetY;
+            if (Math.abs(delta) > 8) {
+              host.scrollTop += delta;
+            }
+          });
+        } catch {
+          /* ignore */
+        }
+      };
+      const id = window.setInterval(tick, 120);
+      return () => window.clearInterval(id);
+    }, [typewriterMode]);
+
+    return (
+      <div
+        ref={rootRef}
+        className={[
+          className ?? "crepe-host",
+          focusMode ? "is-focus" : "",
+          typewriterMode ? "is-typewriter" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      />
+    );
   },
 );

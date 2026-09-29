@@ -5,11 +5,18 @@
 //! 回退：自研 DOCX → LibreOffice；Windows 另可回退 Word COM。
 
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
-use crate::md_docx::{markdown_to_docx_bytes, markdown_to_github_html, PDF_HTML_CANARY};
+use base64::Engine;
+use serde_json::{json, Value};
+
+use crate::export_assets::ExportAssetCtx;
+use crate::md_docx::{
+    markdown_to_docx_bytes_with_ctx, markdown_to_github_html_with_ctx, PDF_HTML_CANARY,
+};
 
 /// PDF 转换所用后端（返回给前端状态栏）。
 pub type PdfExportMode = &'static str;
@@ -79,17 +86,30 @@ fn shell_escape(s: &str) -> String {
 }
 
 /// 在目录内生成临时 docx，返回路径。
-fn md_to_temp_docx(dir: &Path, markdown: &str) -> anyhow::Result<PathBuf> {
-    let bytes = markdown_to_docx_bytes(markdown)?;
+fn md_to_temp_docx(
+    dir: &Path,
+    markdown: &str,
+    ctx: &ExportAssetCtx,
+) -> anyhow::Result<PathBuf> {
+    let bytes = markdown_to_docx_bytes_with_ctx(markdown, ctx)?;
     let out_tmp = dir.join("out.docx");
     fs::write(&out_tmp, bytes)?;
     Ok(out_tmp)
 }
 
 /// Markdown → DOCX（纯 Rust）。
+#[allow(dead_code)] // 无 ctx 便捷入口；IPC 走 with_ctx
 pub fn md_to_docx(markdown: &str, out_path: &Path) -> anyhow::Result<()> {
+    md_to_docx_with_ctx(markdown, out_path, &ExportAssetCtx::default())
+}
+
+pub fn md_to_docx_with_ctx(
+    markdown: &str,
+    out_path: &Path,
+    ctx: &ExportAssetCtx,
+) -> anyhow::Result<()> {
     ensure_parent(out_path)?;
-    let bytes = markdown_to_docx_bytes(markdown)?;
+    let bytes = markdown_to_docx_bytes_with_ctx(markdown, ctx)?;
     fs::write(out_path, bytes)?;
     Ok(())
 }
@@ -327,20 +347,33 @@ exit 0
     );
 }
 
-fn md_to_pdf_github_html(markdown: &str, out_path: &Path) -> anyhow::Result<()> {
-    let html = markdown_to_github_html(markdown)?;
+fn md_to_pdf_github_html(
+    markdown: &str,
+    out_path: &Path,
+    ctx: &ExportAssetCtx,
+) -> anyhow::Result<()> {
+    let html = markdown_to_github_html_with_ctx(markdown, ctx)?;
     html_to_pdf(&html, out_path)
 }
 
 /// Markdown → PDF。返回模式：`github-html` | `libreoffice` | `word`。
+#[allow(dead_code)] // 无 ctx 便捷入口 / 单测；IPC 走 with_ctx
 pub fn md_to_pdf(markdown: &str, out_path: &Path) -> anyhow::Result<PdfExportMode> {
+    md_to_pdf_with_ctx(markdown, out_path, &ExportAssetCtx::default())
+}
+
+pub fn md_to_pdf_with_ctx(
+    markdown: &str,
+    out_path: &Path,
+    ctx: &ExportAssetCtx,
+) -> anyhow::Result<PdfExportMode> {
     ensure_parent(out_path)?;
     let _ = fs::remove_file(out_path);
 
     let mut last_err = String::new();
 
     // 1) GitHub 风 HTML → Edge/Chrome（最接近 github.com 预览）
-    match md_to_pdf_github_html(markdown, out_path) {
+    match md_to_pdf_github_html(markdown, out_path, ctx) {
         Ok(()) if pdf_looks_nonempty(out_path) => return Ok("github-html"),
         Ok(()) => {
             let _ = fs::remove_file(out_path);
@@ -353,7 +386,7 @@ pub fn md_to_pdf(markdown: &str, out_path: &Path) -> anyhow::Result<PdfExportMod
 
     // 2) 回退：DOCX → LibreOffice / Word
     let dir = tmp_export_dir()?;
-    let docx = match md_to_temp_docx(&dir, markdown) {
+    let docx = match md_to_temp_docx(&dir, markdown, ctx) {
         Ok(p) => p,
         Err(e) => {
             let _ = fs::remove_dir_all(&dir);
@@ -515,6 +548,168 @@ fn file_url(path: &Path) -> String {
 }
 
 fn try_print(browser: &Path, file_url: &str, pdf_abs: &Path) -> anyhow::Result<()> {
+    // 优先 CDP：generateDocumentOutline → PDF 书签目录
+    match try_print_cdp(browser, file_url, pdf_abs) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            eprintln!("[lumen] CDP PDF 失败，回退 CLI: {e}");
+        }
+    }
+    try_print_cli(browser, file_url, pdf_abs)
+}
+
+fn pick_free_port() -> anyhow::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+fn wait_http_ok(url: &str, timeout: Duration) -> anyhow::Result<String> {
+    let start = Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < timeout {
+        match ureq_get(url) {
+            Ok(body) => return Ok(body),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    anyhow::bail!("等待 Chrome DevTools 超时: {last}")
+}
+
+/// 极简 HTTP GET（避免再引 reqwest 到同步路径）。
+fn ureq_get(url: &str) -> anyhow::Result<String> {
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()?
+        .get(url)
+        .send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {}", resp.status());
+    }
+    Ok(resp.text()?)
+}
+
+fn try_print_cdp(browser: &Path, file_url: &str, pdf_abs: &Path) -> anyhow::Result<()> {
+    let pdf_for_chrome = strip_windows_verbatim(pdf_abs);
+    let _ = fs::remove_file(&pdf_for_chrome);
+    if pdf_abs != pdf_for_chrome.as_path() {
+        let _ = fs::remove_file(pdf_abs);
+    }
+
+    let port = pick_free_port()?;
+    let mut child: Child = Command::new(browser)
+        .arg("--headless=new")
+        .arg("--no-sandbox")
+        .arg("--disable-gpu")
+        .arg("--allow-file-access-from-files")
+        .arg("--remote-allow-origins=*")
+        .arg(format!("--remote-debugging-port={port}"))
+        .arg(file_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let result = (|| -> anyhow::Result<()> {
+        let list_url = format!("http://127.0.0.1:{port}/json/list");
+        let body = wait_http_ok(&list_url, Duration::from_secs(12))?;
+        let pages: Value = serde_json::from_str(&body)?;
+        let arr = pages
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("/json/list 非数组"))?;
+        let ws = arr
+            .iter()
+            .find_map(|p| {
+                let t = p.get("type")?.as_str()?;
+                if t != "page" {
+                    return None;
+                }
+                p.get("webSocketDebuggerUrl")?.as_str().map(|s| s.to_string())
+            })
+            .ok_or_else(|| anyhow::anyhow!("无可用 page WebSocket"))?;
+
+        let (mut socket, _) = tungstenite::connect(&ws)
+            .map_err(|e| anyhow::anyhow!("WebSocket 连接失败: {e}"))?;
+
+        let mut next_id = 1u64;
+        let mut send = |method: &str, params: Value| -> anyhow::Result<Value> {
+            let id = next_id;
+            next_id += 1;
+            let msg = json!({ "id": id, "method": method, "params": params });
+            socket
+                .send(tungstenite::Message::Text(msg.to_string().into()))
+                .map_err(|e| anyhow::anyhow!("WS send: {e}"))?;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if Instant::now() > deadline {
+                    anyhow::bail!("CDP 等待 {method} 超时");
+                }
+                let msg = socket
+                    .read()
+                    .map_err(|e| anyhow::anyhow!("WS read: {e}"))?;
+                let text = match msg {
+                    tungstenite::Message::Text(t) => t.to_string(),
+                    tungstenite::Message::Ping(p) => {
+                        let _ = socket.send(tungstenite::Message::Pong(p));
+                        continue;
+                    }
+                    tungstenite::Message::Close(_) => anyhow::bail!("WS closed"),
+                    _ => continue,
+                };
+                let v: Value = serde_json::from_str(&text)?;
+                if v.get("id").and_then(|x| x.as_u64()) == Some(id) {
+                    if let Some(err) = v.get("error") {
+                        anyhow::bail!("CDP {method} error: {err}");
+                    }
+                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                }
+            }
+        };
+
+        // 页面可能仍在加载 mermaid；稍等再打印
+        std::thread::sleep(Duration::from_millis(600));
+        let _ = send("Page.enable", json!({}));
+        // 再导航一次保证 file URL 内容就绪
+        let _ = send(
+            "Page.navigate",
+            json!({ "url": file_url }),
+        );
+        std::thread::sleep(Duration::from_millis(800));
+
+        let result = send(
+            "Page.printToPDF",
+            json!({
+                "printBackground": true,
+                "preferCSSPageSize": true,
+                "displayHeaderFooter": false,
+                "generateDocumentOutline": true,
+            }),
+        )?;
+        let data_b64 = result
+            .get("data")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| anyhow::anyhow!("printToPDF 无 data"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .map_err(|e| anyhow::anyhow!("PDF base64: {e}"))?;
+        if bytes.len() < 800 {
+            anyhow::bail!("PDF 过小");
+        }
+        fs::write(&pdf_for_chrome, &bytes)?;
+        if pdf_abs != pdf_for_chrome.as_path() {
+            fs::copy(&pdf_for_chrome, pdf_abs)?;
+        }
+        if !pdf_contains_canary(&pdf_for_chrome) {
+            anyhow::bail!("PDF 缺少 canary，可能未加载目标 HTML");
+        }
+        Ok(())
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn try_print_cli(browser: &Path, file_url: &str, pdf_abs: &Path) -> anyhow::Result<()> {
     let pdf_for_chrome = strip_windows_verbatim(pdf_abs);
     let _ = fs::remove_file(&pdf_for_chrome);
     if pdf_abs != pdf_for_chrome.as_path() {
@@ -617,7 +812,7 @@ mod tests {
 
     #[test]
     fn github_html_contains_canary() {
-        let html = markdown_to_github_html("# hi\n\nprobe").unwrap();
+        let html = crate::md_docx::markdown_to_github_html("# hi\n\nprobe").unwrap();
         assert!(html.contains(PDF_HTML_CANARY));
     }
 

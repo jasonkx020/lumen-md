@@ -1,14 +1,37 @@
 //! Markdown (GFM) → DOCX / GitHub 风 HTML。
 //! 色板与版式对齐 GitHub Primer / GFM 预览；DOCX 为可编辑近似，PDF 优先 HTML 打印。
 
+use std::cell::RefCell;
 use std::io::Cursor;
+use std::panic::AssertUnwindSafe;
 
 use comrak::nodes::{AstNode, ListType, NodeValue, TableAlignment};
 use comrak::{format_html, parse_document, Arena, Options};
 use docx_rs::*;
 
+use crate::export_assets::{
+    embed_images_in_html, extract_local_img_srcs, parse_simple_anchor, read_local_image_bytes,
+    ExportAssetCtx,
+};
 use crate::html_sanitize::{is_html_table, sanitize_html_fragment};
 use crate::html_table_docx::try_html_to_docx_table;
+
+thread_local! {
+    static ASSET_CTX: RefCell<ExportAssetCtx> = RefCell::new(ExportAssetCtx::default());
+}
+
+fn with_asset_ctx<T>(ctx: &ExportAssetCtx, f: impl FnOnce() -> T) -> T {
+    ASSET_CTX.with(|cell| {
+        *cell.borrow_mut() = ctx.clone();
+        let out = f();
+        *cell.borrow_mut() = ExportAssetCtx::default();
+        out
+    })
+}
+
+fn current_asset_ctx() -> ExportAssetCtx {
+    ASSET_CTX.with(|cell| cell.borrow().clone())
+}
 
 const MAX_EXPORT_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -49,6 +72,9 @@ fn gfm_options() -> Options<'static> {
     options.extension.table = true;
     options.extension.tasklist = true;
     options.extension.autolink = true;
+    options.extension.footnotes = true;
+    // 给 h1–h6 生成 id，便于 PDF 书签 / 锚点
+    options.extension.header_ids = Some(String::new());
     options
 }
 
@@ -71,6 +97,110 @@ fn sanitize_html_nodes<'a>(root: &'a AstNode<'a>) {
                 *s = sanitize_html_fragment(s);
             }
             _ => {}
+        }
+    }
+}
+
+fn html_open_tag_name(html: &str) -> Option<String> {
+    let t = html.trim();
+    if t.starts_with("</") || t.ends_with("/>") {
+        return None;
+    }
+    let bytes = t.as_bytes();
+    if !bytes.starts_with(b"<") {
+        return None;
+    }
+    let rest = &t[1..];
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == ':')
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta"
+        | "param" | "source" | "track" | "wbr" => None,
+        _ => {
+            if t.ends_with('>') && !t[1..].contains('<') {
+                Some(lower)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn html_close_tag_name(html: &str) -> Option<String> {
+    let t = html.trim();
+    let rest = t.strip_prefix("</")?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == ':')
+        .collect();
+    if name.is_empty() || !t.ends_with('>') {
+        return None;
+    }
+    Some(name.to_ascii_lowercase())
+}
+
+/// 合并拆散的行内 HTML：`<a …>` + text + `</a>` → 单个 HtmlInline。
+fn merge_html_inlines<'a>(root: &'a AstNode<'a>) {
+    let parents: Vec<&'a AstNode<'a>> = root.descendants().collect();
+    for parent in parents {
+        let children: Vec<&'a AstNode<'a>> = parent.children().collect();
+        if children.len() < 2 {
+            continue;
+        }
+        let mut i = 0usize;
+        while i < children.len() {
+            let open_tag = match &children[i].data.borrow().value {
+                NodeValue::HtmlInline(s) => html_open_tag_name(s),
+                _ => None,
+            };
+            let Some(tag) = open_tag else {
+                i += 1;
+                continue;
+            };
+            let mut parts = Vec::new();
+            if let NodeValue::HtmlInline(s) = &children[i].data.borrow().value {
+                parts.push(s.clone());
+            }
+            let mut depth = 1i32;
+            let mut j = i + 1;
+            let mut ok = false;
+            while j < children.len() && depth > 0 {
+                match &children[j].data.borrow().value {
+                    NodeValue::HtmlInline(s) => {
+                        if html_open_tag_name(s).as_deref() == Some(tag.as_str()) {
+                            depth += 1;
+                        } else if html_close_tag_name(s).as_deref() == Some(tag.as_str()) {
+                            depth -= 1;
+                        }
+                        parts.push(s.clone());
+                        j += 1;
+                        if depth == 0 {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    NodeValue::Text(t) => {
+                        parts.push(t.to_string());
+                        j += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if ok {
+                children[i].data.borrow_mut().value = NodeValue::HtmlInline(parts.join(""));
+                for node in children.iter().take(j).skip(i + 1) {
+                    node.detach();
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
         }
     }
 }
@@ -120,42 +250,64 @@ fn with_para_shading(mut p: Paragraph, fill: &str) -> Paragraph {
 }
 
 /// 将 Markdown 转为 DOCX 字节（OOXML zip）。
+#[allow(dead_code)] // 无 ctx 便捷入口 / 单测；导出走 with_ctx
 pub fn markdown_to_docx_bytes(markdown: &str) -> anyhow::Result<Vec<u8>> {
+    markdown_to_docx_bytes_with_ctx(markdown, &ExportAssetCtx::default())
+}
+
+pub fn markdown_to_docx_bytes_with_ctx(
+    markdown: &str,
+    ctx: &ExportAssetCtx,
+) -> anyhow::Result<Vec<u8>> {
     if markdown.len() as u64 > MAX_EXPORT_BYTES {
         anyhow::bail!("导出内容超过上限 {} bytes", MAX_EXPORT_BYTES);
     }
 
-    let arena = Arena::new();
-    let root = parse_document(&arena, markdown, &gfm_options());
+    with_asset_ctx(ctx, || {
+        let arena = Arena::new();
+        let root = parse_document(&arena, markdown, &gfm_options());
+        merge_html_inlines(root);
+        sanitize_html_nodes(root);
 
-    let mut docx = apply_document_chrome(Docx::new())
-        .add_abstract_numbering(bullet_abstract(BULLET_NUM_ID))
-        .add_abstract_numbering(ordered_abstract(ORDERED_NUM_ID))
-        .add_numbering(Numbering::new(BULLET_NUM_ID, BULLET_NUM_ID))
-        .add_numbering(Numbering::new(ORDERED_NUM_ID, ORDERED_NUM_ID));
+        let mut docx = apply_document_chrome(Docx::new())
+            .add_abstract_numbering(bullet_abstract(BULLET_NUM_ID))
+            .add_abstract_numbering(ordered_abstract(ORDERED_NUM_ID))
+            .add_numbering(Numbering::new(BULLET_NUM_ID, BULLET_NUM_ID))
+            .add_numbering(Numbering::new(ORDERED_NUM_ID, ORDERED_NUM_ID));
 
-    for child in root.children() {
-        docx = append_block(docx, child, None);
-    }
+        let mut bookmark_id = 1usize;
+        for child in root.children() {
+            docx = append_block(docx, child, None, &mut bookmark_id);
+        }
 
-    let mut buf = Cursor::new(Vec::new());
-    docx.build()
-        .pack(&mut buf)
-        .map_err(|e| anyhow::anyhow!("DOCX 打包失败: {e}"))?;
-    Ok(buf.into_inner())
+        let mut buf = Cursor::new(Vec::new());
+        docx.build()
+            .pack(&mut buf)
+            .map_err(|e| anyhow::anyhow!("DOCX 打包失败: {e}"))?;
+        Ok(buf.into_inner())
+    })
 }
 
 /// GitHub 风独立 HTML（PDF 首选打印源）。
 pub fn markdown_to_github_html(markdown: &str) -> anyhow::Result<String> {
+    markdown_to_github_html_with_ctx(markdown, &ExportAssetCtx::default())
+}
+
+pub fn markdown_to_github_html_with_ctx(
+    markdown: &str,
+    ctx: &ExportAssetCtx,
+) -> anyhow::Result<String> {
     if markdown.len() as u64 > MAX_EXPORT_BYTES {
         anyhow::bail!("导出内容超过上限 {} bytes", MAX_EXPORT_BYTES);
     }
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &gfm_options());
+    merge_html_inlines(root);
     sanitize_html_nodes(root);
     let mut body = String::new();
     format_html(root, &gfm_options_allow_sanitized_html(), &mut body)
         .map_err(|e| anyhow::anyhow!("HTML 渲染失败: {e}"))?;
+    body = embed_images_in_html(&body, ctx);
     Ok(format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -212,6 +364,8 @@ body {{
 }}
 .markdown-body a {{ color: var(--accent); text-decoration: none; }}
 .markdown-body a:hover {{ text-decoration: underline; }}
+.markdown-body a[href] {{ cursor: pointer; }}
+.markdown-body a[target="_blank"]::after {{ content: ""; }}
 .markdown-body ul, .markdown-body ol {{ padding-left: 2em; }}
 .markdown-body li + li {{ margin-top: 0.25em; }}
 .markdown-body blockquote {{
@@ -275,13 +429,99 @@ body {{
 }}
 .markdown-body table tr {{ background-color: #fff; }}
 .markdown-body table tr:nth-child(2n) {{ background-color: var(--canvas-subtle); }}
-.markdown-body img {{ max-width: 100%; }}
+.markdown-body img {{ max-width: 100%; height: auto; vertical-align: middle; }}
+.markdown-body a img {{ border: 0; }}
+/* 默认块级图居中；flex 图墙除外 */
+.markdown-body > p > img,
+.markdown-body > p > a > img,
+.markdown-body > img,
+.markdown-body > a > img,
+.markdown-body > picture {{
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}}
+.markdown-body > p:has(> img:only-child),
+.markdown-body > p:has(> a:only-child > img) {{
+  text-align: center;
+}}
+/* Typora/GitHub flex 图墙：可缩成一行 + 图间距 */
+.markdown-body .lumen-html-flex,
+.markdown-body div[style*="display: flex"],
+.markdown-body div[style*="display:flex"] {{
+  display: flex !important;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: initial;
+  line-height: 0;
+}}
+.markdown-body .lumen-html-flex > a,
+.markdown-body .lumen-html-flex > img,
+.markdown-body .lumen-html-flex > picture,
+.markdown-body div[style*="display: flex"] > a,
+.markdown-body div[style*="display:flex"] > a,
+.markdown-body div[style*="display: flex"] > img,
+.markdown-body div[style*="display:flex"] > img {{
+  min-width: 0;
+  flex: 1 1 0;
+  margin: 0;
+  max-width: 100%;
+  line-height: 0;
+}}
+.markdown-body .lumen-html-flex img,
+.markdown-body div[style*="display: flex"] img,
+.markdown-body div[style*="display:flex"] img {{
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  object-fit: contain;
+  vertical-align: top;
+}}
 @media print {{
   .markdown-body {{ padding: 0; max-width: none; }}
   @page {{ margin: 1.5cm; }}
   a {{ color: var(--accent); }}
 }}
+.footnote-ref {{ font-size: 0.75em; vertical-align: super; }}
+.footnotes {{ margin-top: 2em; border-top: 1px solid var(--border); padding-top: 0.5em; font-size: 0.9em; }}
+.mermaid-export {{ text-align: center; margin: 1em 0; }}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+(function () {{
+  function run() {{
+    if (!window.mermaid) return;
+    mermaid.initialize({{ startOnLoad: false, securityLevel: "strict", theme: "neutral" }});
+    var blocks = document.querySelectorAll("pre > code.language-mermaid, pre code.language-mermaid, pre[data-language='mermaid'] code, code.language-mermaid");
+    var i = 0;
+    blocks.forEach(function (code) {{
+      var pre = code.closest("pre") || code.parentElement;
+      if (!pre || pre.dataset.mermaidDone === "1") return;
+      var src = (code.textContent || "").trim();
+      if (!src) return;
+      var host = document.createElement("div");
+      host.className = "mermaid-export";
+      pre.parentNode.insertBefore(host, pre);
+      pre.style.display = "none";
+      pre.dataset.mermaidDone = "1";
+      var id = "mmd-exp-" + (i++);
+      mermaid.render(id, src).then(function (r) {{
+        host.innerHTML = r.svg;
+      }}).catch(function (e) {{
+        host.textContent = String(e);
+        pre.style.display = "";
+      }});
+    }});
+  }}
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
+  else run();
+}})();
+</script>
 </head>
 <body>
 <article class="markdown-body">
@@ -330,6 +570,7 @@ fn apply_document_chrome(docx: Docx) -> Docx {
     for &(level, size, before, after, color, bottom_rule) in headings {
         let id = format!("Heading{level}");
         let name = format!("Heading {level}");
+        // OOXML outlineLvl：0 = 最高级（对应 Heading1）
         let mut style = Style::new(&id, StyleType::Paragraph)
             .name(name)
             .based_on("Normal")
@@ -337,7 +578,8 @@ fn apply_document_chrome(docx: Docx) -> Docx {
             .size(size)
             .color(COLOR_FG)
             .fonts(body_fonts())
-            .line_spacing(heading_spacing(before, after));
+            .line_spacing(heading_spacing(before, after))
+            .outline_lvl((level as usize).saturating_sub(1));
         if let Some(c) = color {
             style = style.color(c);
         }
@@ -455,7 +697,12 @@ struct ListCtx {
     tight: bool,
 }
 
-fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>) -> Docx {
+fn append_block<'a>(
+    mut docx: Docx,
+    node: &'a AstNode<'a>,
+    list: Option<ListCtx>,
+    bookmark_id: &mut usize,
+) -> Docx {
     let value = node.data.borrow().value.clone();
     match value {
         NodeValue::Paragraph => {
@@ -486,12 +733,20 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
                 5 => "Heading5",
                 _ => "Heading6",
             };
-            let p = paragraph_from_inlines(node, InlineOpts::default()).style(style_id);
+            let title = inline_plain_text(node);
+            let bm_name = docx_heading_bookmark_name(*bookmark_id, &title);
+            let id = *bookmark_id;
+            *bookmark_id += 1;
+            let p = paragraph_from_inlines(node, InlineOpts::default())
+                .style(style_id)
+                .outline_lvl((level as usize).saturating_sub(1))
+                .add_bookmark_start(id, bm_name)
+                .add_bookmark_end(id);
             docx.add_paragraph(p)
         }
         NodeValue::BlockQuote | NodeValue::MultilineBlockQuote(_) | NodeValue::Alert(_) => {
             for child in node.children() {
-                docx = append_blockquote_block(docx, child);
+                docx = append_blockquote_block(docx, child, bookmark_id);
             }
             docx
         }
@@ -541,6 +796,7 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
                         indent: base_indent,
                         tight,
                     },
+                    bookmark_id,
                 );
             }
             docx
@@ -553,6 +809,7 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
                 indent: 0,
                 tight: true,
             }),
+            bookmark_id,
         ),
         NodeValue::Table(table) => {
             let aligns = table.alignments.clone();
@@ -656,7 +913,49 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
                     return docx.add_table(table);
                 }
             }
-            let text = strip_rough_html(&sanitize_html_fragment(&hb.literal));
+            let safe = sanitize_html_fragment(&hb.literal);
+            let ctx = current_asset_ctx();
+            let img_srcs = extract_local_img_srcs(&safe);
+            if !img_srcs.is_empty() {
+                let mut any = false;
+                for src in &img_srcs {
+                    if let Some(bytes) = read_local_image_bytes(src, &ctx) {
+                        if let Some(pic) = pic_from_bytes(&bytes) {
+                            docx = docx.add_paragraph(
+                                Paragraph::new()
+                                    .add_run(Run::new().add_image(pic))
+                                    .line_spacing(para_spacing(PARA_AFTER)),
+                            );
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    return docx;
+                }
+            }
+            // 整块近似单个 <a>…</a>（含 star-history）
+            if let Some((href, text)) = parse_simple_anchor(&safe) {
+                let only_anchor = !safe.to_ascii_lowercase().contains("<div")
+                    && !safe.to_ascii_lowercase().contains("<table");
+                if only_anchor {
+                    let mut h = Hyperlink::new(&href, HyperlinkType::External);
+                    h = h.add_run(
+                        Run::new()
+                            .add_text(text)
+                            .fonts(body_fonts())
+                            .size(BODY_SIZE)
+                            .color(COLOR_LINK)
+                            .underline("single"),
+                    );
+                    return docx.add_paragraph(
+                        Paragraph::new()
+                            .add_hyperlink(h)
+                            .line_spacing(para_spacing(PARA_AFTER)),
+                    );
+                }
+            }
+            let text = strip_rough_html(&safe);
             if text.trim().is_empty() {
                 docx
             } else {
@@ -687,7 +986,7 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
         | NodeValue::DescriptionDetails
         | NodeValue::Document => {
             for child in node.children() {
-                docx = append_block(docx, child, list);
+                docx = append_block(docx, child, list, bookmark_id);
             }
             docx
         }
@@ -695,7 +994,11 @@ fn append_block<'a>(mut docx: Docx, node: &'a AstNode<'a>, list: Option<ListCtx>
     }
 }
 
-fn append_blockquote_block<'a>(mut docx: Docx, node: &'a AstNode<'a>) -> Docx {
+fn append_blockquote_block<'a>(
+    mut docx: Docx,
+    node: &'a AstNode<'a>,
+    bookmark_id: &mut usize,
+) -> Docx {
     let value = node.data.borrow().value.clone();
     match value {
         NodeValue::Paragraph => {
@@ -710,18 +1013,23 @@ fn append_blockquote_block<'a>(mut docx: Docx, node: &'a AstNode<'a>) -> Docx {
             docx.add_paragraph(p)
         }
         NodeValue::List(_) | NodeValue::CodeBlock(_) | NodeValue::Heading(_) => {
-            append_block(docx, node, None)
+            append_block(docx, node, None, bookmark_id)
         }
         _ => {
             for child in node.children() {
-                docx = append_blockquote_block(docx, child);
+                docx = append_blockquote_block(docx, child, bookmark_id);
             }
             docx
         }
     }
 }
 
-fn append_list_item<'a>(mut docx: Docx, item: &'a AstNode<'a>, ctx: ListCtx) -> Docx {
+fn append_list_item<'a>(
+    mut docx: Docx,
+    item: &'a AstNode<'a>,
+    ctx: ListCtx,
+    bookmark_id: &mut usize,
+) -> Docx {
     let task_prefix = match &item.data.borrow().value {
         NodeValue::TaskItem(t) => {
             if t.symbol.is_some() {
@@ -766,11 +1074,11 @@ fn append_list_item<'a>(mut docx: Docx, item: &'a AstNode<'a>, ctx: ListCtx) -> 
                 docx = docx.add_paragraph(p);
             }
             NodeValue::List(_) => {
-                docx = append_block(docx, child, Some(ctx));
+                docx = append_block(docx, child, Some(ctx), bookmark_id);
                 first_para = false;
             }
             _ => {
-                docx = append_block(docx, child, None);
+                docx = append_block(docx, child, None, bookmark_id);
                 first_para = false;
             }
         }
@@ -1045,6 +1353,13 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
                 });
             }
             NodeValue::Image(link) => {
+                let ctx = current_asset_ctx();
+                if let Some(bytes) = read_local_image_bytes(&link.url, &ctx) {
+                    if let Some(pic) = pic_from_bytes(&bytes) {
+                        out.push(InlinePiece::Run(Run::new().add_image(pic)));
+                        continue;
+                    }
+                }
                 let alt = inline_plain_text(child);
                 let label = if alt.is_empty() {
                     format!("[图片: {}]", link.url)
@@ -1054,7 +1369,28 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
                 out.push(InlinePiece::Run(styled_run(&label, style).italic()));
             }
             NodeValue::HtmlInline(s) => {
-                let t = strip_rough_html(&sanitize_html_fragment(&s));
+                let safe = sanitize_html_fragment(&s);
+                if let Some((href, text)) = parse_simple_anchor(&safe) {
+                    out.push(InlinePiece::Link {
+                        url: href,
+                        runs: vec![styled_run(&text, style)],
+                    });
+                    continue;
+                }
+                let ctx = current_asset_ctx();
+                let mut embedded = false;
+                for src in extract_local_img_srcs(&safe) {
+                    if let Some(bytes) = read_local_image_bytes(&src, &ctx) {
+                        if let Some(pic) = pic_from_bytes(&bytes) {
+                            out.push(InlinePiece::Run(Run::new().add_image(pic)));
+                            embedded = true;
+                        }
+                    }
+                }
+                if embedded {
+                    continue;
+                }
+                let t = strip_rough_html(&safe);
                 if !t.is_empty() {
                     out.push(InlinePiece::Run(styled_run(&t, style)));
                 }
@@ -1104,6 +1440,22 @@ fn collect_plain_runs<'a>(node: &'a AstNode<'a>, style: &InlineStyle, out: &mut 
     }
 }
 
+/// Word 书签名：字母数字开头，避免非法字符。
+fn docx_heading_bookmark_name(id: usize, title: &str) -> String {
+    let mut slug: String = title
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .take(48)
+        .collect();
+    if slug.is_empty() {
+        slug = "h".into();
+    }
+    if slug.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        slug.insert(0, '_');
+    }
+    format!("_Toc{id}_{slug}")
+}
+
 fn inline_plain_text<'a>(node: &'a AstNode<'a>) -> String {
     let mut s = String::new();
     for child in node.descendants() {
@@ -1144,6 +1496,24 @@ fn styled_run(text: &str, style: &InlineStyle) -> Run {
             .highlight("lightGray");
     }
     r
+}
+
+fn pic_from_bytes(bytes: &[u8]) -> Option<Pic> {
+    // Pic::new 在坏图时可能 panic；失败则放弃嵌入
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let pic = Pic::new(bytes);
+        // 限制导出宽度约 480px，避免撑破页宽
+        let (w, h) = pic.size;
+        let max_w = 480u32 * 9525;
+        if w > max_w && w > 0 {
+            let ratio = max_w as f64 / w as f64;
+            let nh = ((h as f64) * ratio) as u32;
+            pic.size(max_w, nh.max(1))
+        } else {
+            pic
+        }
+    }))
+    .ok()
 }
 
 fn strip_rough_html(s: &str) -> String {
@@ -1354,6 +1724,14 @@ fn main() {}
             "MD-style table should clear vertical borders (nil)"
         );
         assert!(xml.contains("Heading1") || xml.contains("标题"), "missing heading");
+        assert!(
+            xml.contains("w:outlineLvl") || xml.contains("outlineLvl"),
+            "heading missing outlineLvl for navigation bookmarks"
+        );
+        assert!(
+            xml.contains("w:bookmarkStart") || xml.contains("bookmarkStart"),
+            "heading missing bookmark"
+        );
         assert!(xml.contains("w:pBdr"), "missing paragraph borders (quote/hr)");
         assert!(
             xml.contains("F6F8FA") || xml.contains("f6f8fa"),
@@ -1389,6 +1767,44 @@ fn main() {}
     }
 
     #[test]
+    fn github_html_keeps_flex_gallery_div() {
+        let md = r#"## Hardware
+
+<div style="display: flex; justify-content: space-between;">
+  <a href="docs/v1/a.jpg" target="_blank">
+    <img src="docs/v1/a.jpg" width="240" />
+  </a>
+  <a href="docs/v1/b.jpg" target="_blank">
+    <img src="docs/v1/b.jpg" width="240" />
+  </a>
+</div>
+"#;
+        let html = markdown_to_github_html(md).unwrap();
+        assert!(
+            html.contains("display") && html.contains("flex"),
+            "flex style lost: {}",
+            &html[html.find("Hardware").unwrap_or(0)..]
+                .chars()
+                .take(500)
+                .collect::<String>()
+        );
+        assert!(
+            html.contains("justify-content") || html.contains("space-between"),
+            "justify-content lost"
+        );
+        assert!(html.contains("<div"), "div tag lost");
+        assert!(
+            html.contains("lumen-html-flex"),
+            "flex class missing: {}",
+            &html[html.find("Hardware").unwrap_or(0)..]
+                .chars()
+                .take(400)
+                .collect::<String>()
+        );
+        assert!(html.contains("docs/v1/a.jpg") || html.contains("data:image"), "img lost");
+    }
+
+    #[test]
     fn github_html_has_markdown_body_and_tokens() {
         let html = markdown_to_github_html(
             "# Title\n\n| 版本 | 变更 |\n|------|------|\n| 0.1  | 初始 |\n\n`code`\n",
@@ -1401,6 +1817,56 @@ fn main() {}
         assert!(html.contains("#D0D7DE") || html.contains("#d0d7de") || html.contains("D0D7DE"));
         assert!(html.contains("<table"));
         assert!(html.contains("<h1>"));
+    }
+
+    #[test]
+    fn github_html_merges_inline_anchor_and_keeps_target() {
+        let md = r#"- <a href="https://example.com" target="_blank" title="x">LiChuang</a>
+"#;
+        let html = markdown_to_github_html(md).unwrap();
+        assert!(
+            html.contains("LiChuang") && html.contains("https://example.com"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<a ") && html.contains("LiChuang</a>"),
+            "anchor text should be inside <a>: {}",
+            html
+        );
+        assert!(html.contains("target="), "target should be kept: {html}");
+    }
+
+    #[test]
+    fn github_html_embeds_relative_img_with_doc_abs() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "lumen-md-html-embed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xFE,
+            0xD4, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let mut f = std::fs::File::create(dir.join("docs/a.png")).unwrap();
+        f.write_all(png).unwrap();
+        let md_path = dir.join("README.md");
+        std::fs::write(&md_path, "").unwrap();
+        let ctx = ExportAssetCtx {
+            doc_abs: Some(md_path),
+            workspace_root: Some(dir.clone()),
+        };
+        let html = markdown_to_github_html_with_ctx(
+            "<img src=\"docs/a.png\" alt=\"x\" width=\"10\">\n",
+            &ctx,
+        )
+        .unwrap();
+        assert!(html.contains("data:image/png;base64,"), "{html}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1427,7 +1893,8 @@ after
         );
         assert!(html.contains("rowspan"), "rowspan should be kept");
         assert!(!html.contains("<!-- raw HTML omitted -->"));
-        assert!(!html.to_ascii_lowercase().contains("<script"));
+        assert!(!html.to_ascii_lowercase().contains("<script>alert"));
+        assert!(!html.to_ascii_lowercase().contains("文件状态<script"));
     }
 
     #[test]
