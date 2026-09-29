@@ -10,7 +10,7 @@ use comrak::{format_html, parse_document, Arena, Options};
 use docx_rs::*;
 
 use crate::export_assets::{
-    embed_images_in_html, extract_local_img_srcs, parse_simple_anchor, read_local_image_bytes,
+    embed_images_in_html, extract_export_img_srcs, parse_simple_anchor, read_export_image_bytes,
     ExportAssetCtx,
 };
 use crate::html_sanitize::{is_html_table, sanitize_html_fragment};
@@ -915,17 +915,26 @@ fn append_block<'a>(
             }
             let safe = sanitize_html_fragment(&hb.literal);
             let ctx = current_asset_ctx();
-            let img_srcs = extract_local_img_srcs(&safe);
+            let img_srcs = extract_export_img_srcs(&safe);
             if !img_srcs.is_empty() {
+                let href = parse_simple_anchor(&safe).map(|(h, _)| h);
                 let mut any = false;
                 for src in &img_srcs {
-                    if let Some(bytes) = read_local_image_bytes(src, &ctx) {
+                    if let Some(bytes) = read_export_image_bytes(src, &ctx) {
                         if let Some(pic) = pic_from_bytes(&bytes) {
-                            docx = docx.add_paragraph(
+                            let run = Run::new().add_image(pic);
+                            let p = if let Some(ref url) = href {
+                                let mut h = Hyperlink::new(url, HyperlinkType::External);
+                                h = h.add_run(run);
                                 Paragraph::new()
-                                    .add_run(Run::new().add_image(pic))
-                                    .line_spacing(para_spacing(PARA_AFTER)),
-                            );
+                                    .add_hyperlink(h)
+                                    .line_spacing(para_spacing(PARA_AFTER))
+                            } else {
+                                Paragraph::new()
+                                    .add_run(run)
+                                    .line_spacing(para_spacing(PARA_AFTER))
+                            };
+                            docx = docx.add_paragraph(p);
                             any = true;
                         }
                     }
@@ -934,7 +943,7 @@ fn append_block<'a>(
                     return docx;
                 }
             }
-            // 整块近似单个 <a>…</a>（含 star-history）
+            // 整块近似单个 <a>…</a>（无图时保留链接文字）
             if let Some((href, text)) = parse_simple_anchor(&safe) {
                 let only_anchor = !safe.to_ascii_lowercase().contains("<div")
                     && !safe.to_ascii_lowercase().contains("<table");
@@ -1354,7 +1363,7 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
             }
             NodeValue::Image(link) => {
                 let ctx = current_asset_ctx();
-                if let Some(bytes) = read_local_image_bytes(&link.url, &ctx) {
+                if let Some(bytes) = read_export_image_bytes(&link.url, &ctx) {
                     if let Some(pic) = pic_from_bytes(&bytes) {
                         out.push(InlinePiece::Run(Run::new().add_image(pic)));
                         continue;
@@ -1370,17 +1379,10 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
             }
             NodeValue::HtmlInline(s) => {
                 let safe = sanitize_html_fragment(&s);
-                if let Some((href, text)) = parse_simple_anchor(&safe) {
-                    out.push(InlinePiece::Link {
-                        url: href,
-                        runs: vec![styled_run(&text, style)],
-                    });
-                    continue;
-                }
                 let ctx = current_asset_ctx();
                 let mut embedded = false;
-                for src in extract_local_img_srcs(&safe) {
-                    if let Some(bytes) = read_local_image_bytes(&src, &ctx) {
+                for src in extract_export_img_srcs(&safe) {
+                    if let Some(bytes) = read_export_image_bytes(&src, &ctx) {
                         if let Some(pic) = pic_from_bytes(&bytes) {
                             out.push(InlinePiece::Run(Run::new().add_image(pic)));
                             embedded = true;
@@ -1388,6 +1390,13 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
                     }
                 }
                 if embedded {
+                    continue;
+                }
+                if let Some((href, text)) = parse_simple_anchor(&safe) {
+                    out.push(InlinePiece::Link {
+                        url: href,
+                        runs: vec![styled_run(&text, style)],
+                    });
                     continue;
                 }
                 let t = strip_rough_html(&safe);
@@ -1859,6 +1868,7 @@ fn main() {}
         let ctx = ExportAssetCtx {
             doc_abs: Some(md_path),
             workspace_root: Some(dir.clone()),
+            ..Default::default()
         };
         let html = markdown_to_github_html_with_ctx(
             "<img src=\"docs/a.png\" alt=\"x\" width=\"10\">\n",
@@ -1941,6 +1951,76 @@ after
         assert!(
             html.contains("border: 1px solid var(--border)"),
             "cell borders should use shared --border color on all sides"
+        );
+    }
+
+    fn docx_has_media_png(bytes: &[u8]) -> bool {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).expect("zip");
+        for i in 0..archive.len() {
+            let name = archive.by_index(i).unwrap().name().to_string();
+            if name.starts_with("word/media/")
+                && (name.ends_with(".png") || name.ends_with(".jpeg") || name.ends_with(".gif"))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn docx_embeds_local_svg_from_html_img() {
+        let dir = std::env::temp_dir().join(format!(
+            "lumen-docx-svg-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="30">
+  <rect width="60" height="30" fill="#c00"/>
+</svg>"##;
+        std::fs::write(dir.join("docs").join("chart.svg"), svg).unwrap();
+        let md_path = dir.join("README.md");
+        std::fs::write(&md_path, "# x\n").unwrap();
+        let ctx = ExportAssetCtx {
+            doc_abs: Some(md_path),
+            workspace_root: Some(dir.clone()),
+            ..Default::default()
+        };
+        let md = r#"
+<a href="https://example.com/chart">
+  <picture>
+    <img alt="Chart" src="docs/chart.svg" />
+  </picture>
+</a>
+"#;
+        let bytes = markdown_to_docx_bytes_with_ctx(md, &ctx).expect("docx");
+        assert!(
+            docx_has_media_png(&bytes),
+            "local SVG inside picture should rasterize into word/media"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn docx_embeds_star_history_remote_svg() {
+        let md = r#"
+<a href="https://star-history.com/#78/xiaozhi-esp32&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
+ </picture>
+</a>
+"#;
+        let bytes = markdown_to_docx_bytes(md).expect("docx");
+        assert!(
+            docx_has_media_png(&bytes),
+            "star-history remote SVG should be downloaded and embedded as PNG"
+        );
+        let xml = document_xml(bytes);
+        assert!(
+            xml.contains("drawing") || xml.contains("blip") || xml.contains("a:blip"),
+            "document should reference drawing/blip for image"
         );
     }
 }

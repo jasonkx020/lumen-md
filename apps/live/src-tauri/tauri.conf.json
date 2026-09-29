@@ -28,6 +28,11 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi", "dmg", "app", "deb", "rpm", "appimage"],
+    "publisher": "Lumen MD",
+    "copyright": "Copyright © Lumen MD",
+    "category": "Productivity",
+    "shortDescription": "Typora-class WYSIWYG Markdown editor",
+    "longDescription": "Lumen MD Live is a local Markdown editor with Live preview, HTML-in-MD, and export to PDF/DOCX/HTML.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,7 +58,8 @@
     ],
     "windows": {
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "embedBootstrapper",
+        "silent": true
       }
     }
   }

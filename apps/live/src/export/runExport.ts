@@ -1,5 +1,6 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { exportMdToDocx, exportMdToHtml, exportMdToPdf } from "../api";
+import { captureRenderedImages } from "./captureRenderedImages";
 
 export type ExportKind = "pdf" | "docx" | "html";
 
@@ -15,6 +16,8 @@ export async function runExport(args: {
   defaultName: string;
   /** 当前文档绝对路径，用于解析相对图片 */
   docAbs?: string | null;
+  /** 编辑器根节点：DOCX 导出时抓已渲染图 */
+  editorHost?: ParentNode | null;
   /** 用户确认保存路径后、真正开始 IPC 导出前调用（用于显示进度条） */
   onWorkStart?: () => void;
 }): Promise<ExportOk | "cancelled"> {
@@ -49,6 +52,12 @@ export async function runExport(args: {
   });
   if (!path) return "cancelled";
   args.onWorkStart?.();
-  await exportMdToDocx(args.markdown, path, docAbs);
+  const imageOverrides = await captureRenderedImages(args.editorHost);
+  await exportMdToDocx(
+    args.markdown,
+    path,
+    docAbs,
+    Object.keys(imageOverrides).length > 0 ? imageOverrides : null,
+  );
   return { status: "ok" };
 }

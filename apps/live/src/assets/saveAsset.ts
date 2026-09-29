@@ -49,6 +49,11 @@ export async function resolveAssetUrl(
   });
 }
 
+/** 远程 http(s) 图：落盘缓存后返回 data URL（同源，便于 canvas 导出）。 */
+export async function cacheRemoteImage(url: string): Promise<string> {
+  return invoke("cache_remote_image", { url });
+}
+
 /** 从本机绝对路径导入图片到 assets，返回相对路径。 */
 export async function importAssetPath(
   absPath: string,

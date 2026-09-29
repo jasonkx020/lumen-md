@@ -178,6 +178,7 @@ fn export_md_to_docx(
     markdown: String,
     path: String,
     doc_abs: Option<String>,
+    image_overrides: Option<std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
     let p = PathBuf::from(&path);
     let lower = p
@@ -187,11 +188,13 @@ fn export_md_to_docx(
     if lower != "docx" {
         return Err("目标路径须为 .docx".into());
     }
-    let ctx = export_ctx_from_state(&state, doc_abs);
+    let overrides = export_assets::parse_image_overrides(image_overrides);
+    let ctx = export_ctx_from_state(&state, doc_abs).with_image_overrides(overrides);
     export_file::md_to_docx_with_ctx(&markdown, &p, &ctx).map_err(map_err)
 }
 
-/// Markdown → PDF（首选 GitHub HTML；回退 DOCX→Word/LO；返回模式 github-html|libreoffice|word）。
+/// Markdown → PDF（首选 GitHub HTML→本机 HTTP→浏览器打印；回退 DOCX→LibreOffice）。
+/// 返回模式：`github-html` | `libreoffice`。
 #[tauri::command]
 fn export_md_to_pdf(
     state: State<'_, AppState>,
@@ -647,6 +650,12 @@ fn fs_import_asset_path(
     fs_save_asset(state, bytes_base64, name, mime, doc_abs)
 }
 
+/// 远程 http(s) 图片：磁盘缓存后返回 data URL（预览同源，便于 canvas 导出）。
+#[tauri::command]
+fn cache_remote_image(url: String) -> Result<String, String> {
+    export_assets::cache_remote_image_data_url(&url).map_err(map_err)
+}
+
 /// 将工作区相对路径图片读为 data URL（供编辑器预览）。
 #[tauri::command]
 fn resolve_asset_url(
@@ -923,6 +932,7 @@ pub fn run() {
             fs_save_asset,
             fs_import_asset_path,
             resolve_asset_url,
+            cache_remote_image,
             workspace_search,
             resolve_doc_link,
             settings_get,

@@ -147,11 +147,13 @@ export async function exportMdToDocx(
   markdown: string,
   path: string,
   docAbs?: string | null,
+  imageOverrides?: Record<string, string> | null,
 ): Promise<void> {
   return invoke("export_md_to_docx", {
     markdown,
     path,
     docAbs: docAbs ?? null,
+    imageOverrides: imageOverrides ?? null,
   });
 }
 

@@ -41,7 +41,7 @@ docx-rs = { version = "0.4", features = ["image"] }
 # HTML 消毒 / 表解析（导出 HTML table 含 rowspan）
 ammonia = "4"
 scraper = "0.22"
-tungstenite = { version = "0.24", default-features = true }
+resvg = "0.44"
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -51,4 +51,5 @@ codegen-units = 1
 lto = true
 opt-level = 3
 panic = "abort"
-strip = true
+# 只剥 debuginfo，保留符号表，降低杀软对「全剥离未知样本」的启发式加分
+strip = "debuginfo"

@@ -22,6 +22,7 @@ import {
   DEFAULT_THEME,
   parseThemeId,
   themeIdFromAction,
+  themeIsDark,
   type ThemeId,
 } from "./theme/androidStudio";
 import { AiContextMenu } from "./components/AiContextMenu";
@@ -32,6 +33,7 @@ import {
 import { AiPanel, type AiPanelHandle } from "./components/AiPanel";
 import { CrepeEditor, type CrepeEditorHandle } from "./components/CrepeEditor";
 import { setHtmlAssetDocAbs } from "./markdown/htmlAssetContext";
+import { rewriteHtmlImgSrcs } from "./markdown/rewriteHtmlAssets";
 import { FileTree } from "./components/FileTree";
 import {
   MenuBar,
@@ -871,6 +873,7 @@ export default function App() {
         markdown: md,
         defaultName: tab?.title ?? "export",
         docAbs: resolveDocAbs(tab),
+        editorHost: editorRef.current?.getHost() ?? null,
         onWorkStart: () => exportProgress.start(labels[kind]),
       });
       if (result === "cancelled") {
@@ -986,7 +989,16 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    document.documentElement.style.colorScheme = themeIsDark(theme)
+      ? "dark"
+      : "light";
+    const host = editorRef.current?.getHost();
+    if (host) {
+      void rewriteHtmlImgSrcs(host, resolveDocAbs(
+        tabsRef.current.find((t) => t.id === activeIdRef.current),
+      ));
+    }
+  }, [theme, resolveDocAbs]);
 
   useEffect(() => {
     let disposed = false;
