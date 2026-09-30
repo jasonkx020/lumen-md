@@ -1495,20 +1495,143 @@ button.primary:disabled {
   scroll-behavior: smooth;
 }
 
-.mermaid-chart {
-  margin: 0.75em 0;
+.mermaid-preview-root {
+  margin: 0.25em 0 0;
+}
+
+/* 未选中/未进入编辑：纯预览，不显示编辑工具条 */
+.milkdown-code-block:not(.selected):not(.mermaid-editing) .mermaid-edit-toolbar {
+  display: none !important;
+}
+
+.milkdown-code-block:not(.selected):not(.mermaid-editing) .mermaid-preview g.node {
+  cursor: default;
+}
+
+/* Mermaid 默认预览态收起语言/复制栏，避免挡图 */
+.milkdown-code-block:has(.mermaid-preview-root):not(.selected):not(
+    .mermaid-editing
+  ):not(:focus-within)
+  > .tools {
+  display: none;
+}
+
+.milkdown-code-block:has(.mermaid-preview-root):not(.selected):not(
+    .mermaid-editing
+  ) {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.milkdown-code-block:has(.mermaid-preview-root).selected > .tools .language-button,
+.milkdown-code-block:has(.mermaid-preview-root).mermaid-editing
+  > .tools
+  .language-button,
+.milkdown-code-block:has(.mermaid-preview-root).selected
+  > .tools
+  .tools-button-group
+  > button,
+.milkdown-code-block:has(.mermaid-preview-root).mermaid-editing
+  > .tools
+  .tools-button-group
+  > button {
+  opacity: 1;
+}
+
+.milkdown-code-block.mermaid-editing {
+  outline: 1px solid color-mix(in srgb, #2563eb 55%, transparent);
+}
+
+.mermaid-edit-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35em 0.45em;
+  margin: 0 0 0.4em;
+  padding: 0.25em 0;
+  font-size: 12px;
+  line-height: 1.3;
+  user-select: none;
+}
+
+.mermaid-edit-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  background: color-mix(in srgb, Canvas 92%, CanvasText);
+  color: inherit;
+  border-radius: 4px;
+  padding: 0.2em 0.55em;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mermaid-edit-btn:hover {
+  border-color: color-mix(in srgb, CanvasText 40%, transparent);
+  background: color-mix(in srgb, Canvas 84%, CanvasText);
+}
+
+.mermaid-edit-btn.is-active {
+  border-color: #2563eb;
+  background: color-mix(in srgb, #2563eb 18%, Canvas);
+  color: #1d4ed8;
+}
+
+.mermaid-edit-hint,
+.mermaid-edit-status {
+  color: color-mix(in srgb, CanvasText 55%, transparent);
+  font-size: 11px;
+}
+
+.mermaid-edit-status:not(:empty) {
+  margin-left: 0.25em;
+}
+
+.mermaid-preview {
   text-align: center;
   overflow-x: auto;
 }
 
-.mermaid-source-collapsed {
-  display: none !important;
+.mermaid-preview svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.milkdown-code-block.selected .mermaid-preview g.node,
+.milkdown-code-block.mermaid-editing .mermaid-preview g.node {
+  cursor: pointer;
+}
+
+.mermaid-preview g.node.mermaid-link-from > rect,
+.mermaid-preview g.node.mermaid-link-from > polygon,
+.mermaid-preview g.node.mermaid-link-from > circle,
+.mermaid-preview g.node.mermaid-link-from > path {
+  stroke: #2563eb !important;
+  stroke-width: 2.5px !important;
+}
+
+.mermaid-preview-root:has(.mermaid-edit-btn.is-active) .mermaid-preview {
+  outline: 1px dashed color-mix(in srgb, #2563eb 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .mermaid-error {
   color: #c62828;
   font-size: 12px;
   white-space: pre-wrap;
+  text-align: left;
+  margin: 0.5em 0;
+}
+
+/* 旧 DOM 扫描路径遗留样式（可忽略） */
+.mermaid-chart {
+  margin: 0.35em 0 0.75em;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.mermaid-source-collapsed {
+  display: none !important;
 }
 
 /* 脚注（源码 [^id] + 导出 HTML；Live 内若呈纯文本也可读） */

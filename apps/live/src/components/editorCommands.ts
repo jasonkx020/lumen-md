@@ -17,6 +17,7 @@ import {
 } from "@milkdown/kit/preset/gfm";
 import { callCommand, replaceAll } from "@milkdown/kit/utils";
 import type { MenuAction } from "./MenuBar";
+import { DEFAULT_MERMAID_TEMPLATE } from "../diagrams/mermaidIcon";
 
 export function runFormatAction(crepe: Crepe | null, action: MenuAction): boolean {
   if (!crepe) return false;
@@ -61,6 +62,12 @@ export function runFormatAction(crepe: Crepe | null, action: MenuAction): boolea
     case "codeBlock":
       run(createCodeBlockCommand.key);
       return true;
+    case "mermaid": {
+      const md = crepe.getMarkdown();
+      const block = `\n\n\`\`\`mermaid\n${DEFAULT_MERMAID_TEMPLATE}\n\`\`\`\n`;
+      crepe.editor.action(replaceAll(`${md.trimEnd()}${block}`, true));
+      return true;
+    }
     case "table":
       run(insertTableCommand.key, { row: 3, col: 3 });
       return true;

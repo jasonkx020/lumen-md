@@ -37,6 +37,7 @@ export type MenuAction =
   | "orderedList"
   | "blockquote"
   | "codeBlock"
+  | "mermaid"
   | "table"
   | "hr"
   | "bold"
@@ -114,6 +115,7 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "有序列表", action: "orderedList" },
       { type: "item", label: "引用", action: "blockquote" },
       { type: "item", label: "代码块", action: "codeBlock" },
+      { type: "item", label: "Mermaid 图", action: "mermaid" },
       { type: "item", label: "表格", action: "table" },
       { type: "item", label: "分隔线", action: "hr" },
     ],

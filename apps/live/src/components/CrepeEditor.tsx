@@ -5,14 +5,33 @@ import {
   useRef,
 } from "react";
 import { Crepe } from "@milkdown/crepe";
-import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
+import {
+  commandsCtx,
+  editorViewCtx,
+  parserCtx,
+} from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
 import type { Node as PmNode, Schema } from "@milkdown/kit/prose/model";
 import { TextSelection } from "@milkdown/kit/prose/state";
+import {
+  clearTextInCurrentBlockCommand,
+  codeBlockSchema,
+  setBlockTypeCommand,
+} from "@milkdown/kit/preset/commonmark";
 import { replaceAll, replaceRange } from "@milkdown/kit/utils";
 import { upload, uploadConfig } from "@milkdown/kit/plugin/upload";
+import { codeBlockConfig } from "@milkdown/kit/component/code-block";
 import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
 import { normalizeGithubHtml } from "../markdown/normalizeGithubHtml";
+import { normalizeMermaidFencesInMarkdown } from "../diagrams/normalizeMermaidMd";
+import {
+  DEFAULT_MERMAID_TEMPLATE,
+  mermaidMenuIcon,
+} from "../diagrams/mermaidIcon";
+import {
+  renderMermaidPreview,
+  shouldRenderMermaid,
+} from "../diagrams/mermaidPreview";
 import {
   decodeImageAltFromCrepe,
   encodeImageAltForCrepe,
@@ -38,7 +57,6 @@ import {
 } from "../markdown/tableCellSelection";
 import { resolveAssetUrl, saveAssetFile } from "../assets/saveAsset";
 import { setHtmlAssetDocAbs } from "../markdown/htmlAssetContext";
-import { attachMermaidRenderer } from "../diagrams/mermaidView";
 import { findAnchorFromMouseEvent } from "../links/resolveLink";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -104,7 +122,9 @@ function createImageNodes(schema: Schema, src: string, alt: string): PmNode[] {
 
 function normalizeIncomingMarkdown(md: string): string {
   return encodeImageAltForCrepe(
-    normalizeGithubHtml(normalizeGfmTables(md)),
+    normalizeMermaidFencesInMarkdown(
+      normalizeGithubHtml(normalizeGfmTables(md)),
+    ),
   );
 }
 
@@ -137,7 +157,9 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
     const crepeRef = useRef<Crepe | null>(null);
     const readyRef = useRef(false);
     const lastMdRef = useRef(
-      normalizeGithubHtml(normalizeGfmTables(initialMarkdown)),
+      normalizeMermaidFencesInMarkdown(
+        normalizeGithubHtml(normalizeGfmTables(initialMarkdown)),
+      ),
     );
     const onChangeRef = useRef(onChange);
     const onLinkClickRef = useRef(onLinkClick);
@@ -188,7 +210,9 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         // 打开文件时父组件可能同步调用 setMarkdown，早于本次 render；
         // 用 ref 再刷一次上下文，避免相对图片按错误/空文档路径解析。
         setHtmlAssetDocAbs(docAbsRef.current);
-        const base = normalizeGithubHtml(normalizeGfmTables(md));
+        const base = normalizeMermaidFencesInMarkdown(
+          normalizeGithubHtml(normalizeGfmTables(md)),
+        );
         lastMdRef.current = base;
         const c = crepeRef.current;
         if (!c || !readyRef.current) return;
@@ -494,11 +518,45 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
               table: { label: "表格" },
               math: { label: "公式" },
             },
+            buildMenu: (builder) => {
+              const advanced = builder.getGroup("advanced");
+              advanced.addItem("mermaid", {
+                label: "Mermaid 图",
+                icon: mermaidMenuIcon,
+                onRun: (ctx: Ctx) => {
+                  const commands = ctx.get(commandsCtx);
+                  const view = ctx.get(editorViewCtx);
+                  const codeBlock = codeBlockSchema.type(ctx);
+                  commands.call(clearTextInCurrentBlockCommand.key);
+                  commands.call(setBlockTypeCommand.key, {
+                    nodeType: codeBlock,
+                    attrs: { language: "mermaid" },
+                  });
+                  const { state, dispatch } = view;
+                  const { from } = state.selection;
+                  dispatch(state.tr.insertText(DEFAULT_MERMAID_TEMPLATE, from));
+                },
+              });
+            },
           },
         },
       });
       crepe.editor
         .config((ctx) => {
+          ctx.update(codeBlockConfig.key, (prev) => ({
+            ...prev,
+            renderPreview: (language, content, applyPreview) => {
+              if (shouldRenderMermaid(language, content)) {
+                return renderMermaidPreview(content, applyPreview);
+              }
+              return prev.renderPreview(language, content, applyPreview);
+            },
+            previewOnlyByDefault: true,
+            previewToggleButton: (previewOnlyMode) =>
+              previewOnlyMode ? "编辑源码" : "隐藏源码",
+            previewLabel: "预览",
+            previewLoading: "正在渲染 Mermaid…",
+          }));
           ctx.update(uploadConfig.key, (prev) => ({
             ...prev,
             enableHtmlFileUploader: true,
@@ -566,11 +624,9 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           }, 0);
         }
       });
-      const detachMermaid = attachMermaidRenderer(el);
       return () => {
         disposed = true;
         readyRef.current = false;
-        detachMermaid();
         void crepe.destroy();
         crepeRef.current = null;
       };
