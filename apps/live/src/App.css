@@ -1212,6 +1212,14 @@ button.primary:disabled {
   margin: 4px 6px;
 }
 
+.ai-context-section-label {
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
 /* AI before/after review */
 .ai-diff-dialog {
   position: fixed;
@@ -1663,4 +1671,294 @@ button.primary:disabled {
   .ai-diff-col:last-child {
     border-bottom: none;
   }
+}
+
+/* 行内 $ 公式浮层：左编辑区 + 右按钮列（不挪动 Vue DOM） */
+.milkdown-latex-inline-edit {
+  padding: 8px 10px !important;
+  max-width: min(420px, 92vw);
+}
+
+.milkdown-latex-inline-edit .lumen-latex-inline-container.container {
+  display: grid !important;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: start;
+}
+
+.milkdown-latex-inline-edit .lumen-latex-inline-container > div {
+  grid-column: 1;
+  grid-row: 1 / span 8;
+  min-width: 180px;
+  align-self: stretch;
+  border-right: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  padding-right: 10px;
+}
+
+.milkdown-latex-inline-edit .lumen-latex-inline-container .ProseMirror {
+  min-width: 180px !important;
+  max-width: 320px !important;
+  padding: 4px 2px !important;
+  line-height: 1.45;
+  color: var(--text, CanvasText);
+  caret-color: var(--text, CanvasText);
+}
+
+.milkdown-latex-inline-edit .container > button.lumen-latex-confirm-btn,
+.milkdown-latex-inline-edit .container > button.lumen-formula-visual-btn {
+  grid-column: 2;
+  appearance: none;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  width: auto !important;
+  min-width: 72px;
+  height: 28px !important;
+  padding: 0 10px !important;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, Canvas 94%, CanvasText);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.milkdown-latex-inline-edit .container > button.lumen-latex-confirm-btn:hover,
+.milkdown-latex-inline-edit .container > button.lumen-formula-visual-btn:hover {
+  background: color-mix(in srgb, #2563eb 14%, Canvas);
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+
+.milkdown-latex-inline-edit .lumen-latex-confirm-btn svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.milkdown-latex-inline-edit .lumen-formula-visual-ico {
+  font-size: 11px;
+  opacity: 0.85;
+  line-height: 1;
+}
+
+/* MathLive 可视化公式弹层 */
+.formula-visual-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.32);
+  padding: 16px;
+}
+
+.formula-visual-panel {
+  position: relative;
+  width: min(720px, 96vw);
+  max-height: min(90vh, 820px);
+  /* 勿 overflow:hidden/auto，否则挂在 panel 内的虚拟键盘会被裁切 */
+  overflow: visible;
+  background: var(--bg-elev, var(--bg));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 虚拟键盘挂 body：须高于公式遮罩(200)，且可点 */
+:root {
+  --keyboard-zindex: 330;
+}
+
+body > .ML__keyboard,
+body > .ML__keyboard-container,
+body > math-virtual-keyboard {
+  z-index: 330 !important;
+  pointer-events: none; /* 与 MathLive 一致；按键区自行开启 */
+}
+
+body > .ML__keyboard .MLK__plate,
+body > .ML__keyboard .MLK__backdrop,
+body > .ML__keyboard .MLK__keycap,
+body > .ML__keyboard .action,
+body > .ML__keyboard .fnbutton,
+body > .ML__keyboard .bigfnbutton {
+  pointer-events: auto !important;
+}
+
+.ML__menu-container,
+.ML__popover {
+  z-index: 340 !important;
+  pointer-events: auto !important;
+}
+
+.formula-visual-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.formula-visual-kind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.formula-visual-kind-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.formula-visual-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.formula-visual-modes,
+.formula-visual-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.formula-visual-modes button,
+.formula-visual-tabs button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.formula-visual-modes button.is-active,
+.formula-visual-tabs button.is-active {
+  background: color-mix(in srgb, #2563eb 18%, transparent);
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+
+.formula-visual-palettes {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  background: color-mix(in srgb, Canvas 94%, CanvasText);
+}
+
+.formula-visual-group + .formula-visual-group {
+  margin-top: 8px;
+}
+
+.formula-visual-group-name {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.formula-visual-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.formula-visual-chips button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg, Canvas);
+  color: inherit;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.formula-visual-chips button:hover {
+  border-color: #2563eb;
+  background: color-mix(in srgb, #2563eb 12%, Canvas);
+}
+
+.formula-visual-field {
+  min-height: 88px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fff;
+}
+
+.formula-visual-field .lumen-mathfield,
+.formula-visual-field math-field {
+  width: 100%;
+  min-height: 72px;
+  font-size: 20px;
+  border: none;
+  outline: none;
+  background: transparent;
+}
+
+.formula-visual-source {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 88px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: var(--font-editor, ui-monospace, monospace);
+  font-size: 13px;
+  background: var(--bg, Canvas);
+  color: var(--text);
+}
+
+.formula-visual-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.formula-btn-ghost,
+.formula-btn-primary {
+  appearance: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.formula-btn-ghost {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.formula-btn-primary {
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+}
+
+.formula-btn-primary:hover {
+  background: #1d4ed8;
 }

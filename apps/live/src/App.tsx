@@ -25,7 +25,10 @@ import {
   themeIsDark,
   type ThemeId,
 } from "./theme/androidStudio";
-import { AiContextMenu } from "./components/AiContextMenu";
+import {
+  AiContextMenu,
+  type InsertMenuAction,
+} from "./components/AiContextMenu";
 import {
   AiDiffModal,
   type AiDiffPreview,
@@ -55,7 +58,7 @@ import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
 import { prepareCellInlineText } from "./markdown/tableCellSelection";
 import { countWords, footnoteHintCss, nextFootnoteRef, splitFrontMatter, upsertToc } from "./chrome/docUtils";
-import { importAssetPath, isImagePath } from "./assets/saveAsset";
+import { importAssetPath, isImagePath, saveAssetFile } from "./assets/saveAsset";
 import type { OutlineHeading } from "./markdown/extractOutline";
 import {
   absKey,
@@ -368,7 +371,8 @@ export default function App() {
             const insert = inPipeRow ? prepareCellInlineText(text) : text;
             const next =
               md.slice(0, idx) + insert + md.slice(idx + before.length);
-            if (!sourceMode) editorRef.current?.setMarkdown(next);
+            // 保留撤销栈：勿用 setMarkdown（flush 会清空 history）
+            if (!sourceMode) editorRef.current?.replaceDocumentMarkdown(next);
             markDirtyFrom(next);
             return true;
           }
@@ -378,7 +382,8 @@ export default function App() {
       if (sourceMode) {
         markDirtyFrom(text);
       } else {
-        editorRef.current?.setMarkdown(text);
+        // 整篇 AI 写回：replaceAll(flush=false)，可 Ctrl+Z
+        editorRef.current?.replaceDocumentMarkdown(text);
         markDirtyFrom(text);
       }
       return true;
@@ -476,6 +481,83 @@ export default function App() {
     [sourceMode],
   );
 
+  const insertCtxImageInputRef = useRef<HTMLInputElement>(null);
+
+  const pickAndInsertImage = useCallback(() => {
+    insertCtxImageInputRef.current?.click();
+  }, []);
+
+  const onCtxImagePicked = useCallback(
+    async (files: FileList | null) => {
+      const file = files?.[0];
+      if (!file || !file.type.includes("image")) return;
+      try {
+        const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+        const docAbs =
+          tab?.absPath ??
+          (workspaceRoot && tab?.relPath
+            ? `${workspaceRoot.replace(/[/\\]+$/, "")}/${tab.relPath}`.replace(
+                /\//g,
+                "\\",
+              )
+            : null);
+        const rel = await saveAssetFile(file, {
+          preferredName: file.name,
+          mimeHint: file.type,
+          docAbs,
+        });
+        const alt = file.name.replace(/\.[^.]+$/, "") || "image";
+        editorRef.current?.focus();
+        const ok = editorRef.current?.insertImageSrc(rel, alt);
+        if (!ok) {
+          const md = currentEditorMarkdown();
+          applyMarkdownReplace(`${md}\n\n![${alt}](${rel})\n`);
+        }
+        setStatus(`已插入图片 ${rel}`);
+      } catch (e) {
+        setStatus(`插入图片失败: ${e}`);
+      } finally {
+        if (insertCtxImageInputRef.current) {
+          insertCtxImageInputRef.current.value = "";
+        }
+      }
+    },
+    [applyMarkdownReplace, currentEditorMarkdown, workspaceRoot],
+  );
+
+  const onEditorInsert = useCallback(
+    (id: InsertMenuAction) => {
+      if (sourceMode) return;
+      editorRef.current?.focus();
+      switch (id) {
+        case "formulaInline":
+          editorRef.current?.openFormulaInsert("inline");
+          break;
+        case "formulaBlock":
+          editorRef.current?.openFormulaInsert("block");
+          break;
+        case "mermaid":
+          editorRef.current?.insertMermaidAtCursor();
+          break;
+        case "table":
+          runFormatAction(editorRef.current?.getCrepe() ?? null, "table");
+          break;
+        case "codeBlock":
+          runFormatAction(editorRef.current?.getCrepe() ?? null, "codeBlock");
+          break;
+        case "hr":
+          runFormatAction(editorRef.current?.getCrepe() ?? null, "hr");
+          break;
+        case "image":
+          pickAndInsertImage();
+          break;
+        default:
+          break;
+      }
+    },
+    [pickAndInsertImage, sourceMode],
+  );
+
   const focusTab = useCallback(
     (id: string) => {
       if (id === activeIdRef.current) return;
@@ -554,6 +636,23 @@ export default function App() {
     [flushActiveToTabs, loadTabIntoEditor],
   );
 
+  /** 原生对话框关闭后恢复窗口焦点与鼠标光标（WebView2 常见丢光标）。 */
+  const restoreUiAfterNativeDialog = useCallback(async () => {
+    try {
+      await getCurrentWindow().setFocus();
+    } catch {
+      /* 非 Tauri */
+    }
+    const prev = document.body.style.cursor;
+    document.body.style.cursor = "auto";
+    // 强制一帧样式刷新，避免系统光标卡在 dialog 隐藏态
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    document.body.style.cursor = prev || "";
+    document.documentElement.style.cursor = "";
+    if (sourceMode) sourceRef.current?.focus();
+    else editorRef.current?.focus();
+  }, [sourceMode]);
+
   const doSave = useCallback(async () => {
     flushActiveToTabs();
     const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
@@ -591,6 +690,7 @@ export default function App() {
         filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
         defaultPath: `${tab.title === "欢迎" ? "untitled" : tab.title}.md`,
       });
+      await restoreUiAfterNativeDialog();
       if (!selected) return;
       const abs = await registerAndWriteAbs(selected, md);
       const upgraded: EditorTab = {
@@ -609,10 +709,12 @@ export default function App() {
       tabsRef.current = next;
       setTabs(next);
       setStatus(`已保存 ${upgraded.title}`);
+      await restoreUiAfterNativeDialog();
     } catch (e) {
+      await restoreUiAfterNativeDialog();
       setStatus(`保存失败: ${e}`);
     }
-  }, [flushActiveToTabs]);
+  }, [flushActiveToTabs, restoreUiAfterNativeDialog]);
 
   const openFolderDialog = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -911,6 +1013,7 @@ export default function App() {
         filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
         defaultPath: `${tab.title === "欢迎" ? "untitled" : tab.title}.md`,
       });
+      await restoreUiAfterNativeDialog();
       if (!selected) return;
       const abs = await registerAndWriteAbs(selected, md);
       const upgraded: EditorTab = {
@@ -929,10 +1032,12 @@ export default function App() {
       tabsRef.current = next;
       setTabs(next);
       setStatus(`已另存为 ${upgraded.title}`);
+      await restoreUiAfterNativeDialog();
     } catch (e) {
+      await restoreUiAfterNativeDialog();
       setStatus(`另存为失败: ${e}`);
     }
-  }, [flushActiveToTabs]);
+  }, [flushActiveToTabs, restoreUiAfterNativeDialog]);
 
   const jumpFindHit = useCallback(
     (index: number, len: number) => {
@@ -1385,12 +1490,21 @@ export default function App() {
           setAiDiff(null);
         }}
       />
+      <input
+        ref={insertCtxImageInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={(e) => void onCtxImagePicked(e.target.files)}
+      />
       <AiContextMenu
         open={ctxMenu.open}
         x={ctxMenu.x}
         y={ctxMenu.y}
         hasKey={hasAiKey && !aiKeyInvalid}
         hasSelection={ctxMenu.hasSelection}
+        showInsert={!sourceMode}
+        onInsert={onEditorInsert}
         onRun={(id) => void runAi(id, "")}
         onOpenAiPanel={() => {
           setShowAiPanel(true);

@@ -3,6 +3,7 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
 } from "react";
 import { Crepe } from "@milkdown/crepe";
 import {
@@ -58,6 +59,17 @@ import {
 import { resolveAssetUrl, saveAssetFile } from "../assets/saveAsset";
 import { setHtmlAssetDocAbs } from "../markdown/htmlAssetContext";
 import { findAnchorFromMouseEvent } from "../links/resolveLink";
+import {
+  FormulaVisualEditor,
+  type FormulaDisplayKind,
+} from "../formula/FormulaVisualEditor";
+import {
+  applyFormulaLatex,
+  attachFormulaVisualEdit,
+  formulaRequestDisplayKind,
+  isFormulaInsertRequest,
+  type FormulaEditRequest,
+} from "../formula/attachFormulaVisualEdit";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 import "@milkdown/prose/tables/style/tables.css";
@@ -74,7 +86,13 @@ export type SelectionMeta = {
 
 export type CrepeEditorHandle = {
   getMarkdown: () => string;
+  /** 打开文件 / 切 Tab：flush 重建 state（不进入撤销栈） */
   setMarkdown: (md: string) => void;
+  /**
+   * 用 Markdown 替换全文，但保留 ProseMirror history（可 Ctrl+Z）。
+   * AI 整篇写回、就地改写等应走此路径，勿用 setMarkdown。
+   */
+  replaceDocumentMarkdown: (md: string) => void;
   focus: () => void;
   runAction: (fn: (ctx: unknown) => void) => void;
   getCrepe: () => Crepe | null;
@@ -88,6 +106,10 @@ export type CrepeEditorHandle = {
   selectTextNear: (index: number, len: number) => void;
   /** 在光标处插入相对路径图片（拖入用） */
   insertImageSrc: (src: string, alt?: string) => boolean;
+  /** 打开可视化公式编辑器以在光标处新建 */
+  openFormulaInsert: (kind?: FormulaDisplayKind) => void;
+  /** 在光标处插入 Mermaid 代码块（与斜杠菜单一致） */
+  insertMermaidAtCursor: () => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -133,8 +155,8 @@ function normalizeOutgoingMarkdown(md: string): string {
   return decodeImageAltFromCrepe(md);
 }
 
-function applyMarkdown(crepe: Crepe, md: string) {
-  crepe.editor.action(replaceAll(normalizeIncomingMarkdown(md), true));
+function applyMarkdown(crepe: Crepe, md: string, flush = true) {
+  crepe.editor.action(replaceAll(normalizeIncomingMarkdown(md), flush));
 }
 
 export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
@@ -156,6 +178,10 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
     const rootRef = useRef<HTMLDivElement>(null);
     const crepeRef = useRef<Crepe | null>(null);
     const readyRef = useRef(false);
+    const formulaDisposeRef = useRef<(() => void) | null>(null);
+    const [formulaReq, setFormulaReq] = useState<FormulaEditRequest | null>(
+      null,
+    );
     const lastMdRef = useRef(
       normalizeMermaidFencesInMarkdown(
         normalizeGithubHtml(normalizeGfmTables(initialMarkdown)),
@@ -218,7 +244,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         if (!c || !readyRef.current) return;
         suppressRef.current += 1;
         try {
-          applyMarkdown(c, base);
+          applyMarkdown(c, base, true);
         } finally {
           setTimeout(() => {
             suppressRef.current = Math.max(0, suppressRef.current - 1);
@@ -226,6 +252,19 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             if (host) void rewriteHtmlImgSrcs(host, docAbsRef.current);
           }, 0);
         }
+      },
+      replaceDocumentMarkdown: (md: string) => {
+        setHtmlAssetDocAbs(docAbsRef.current);
+        const base = normalizeMermaidFencesInMarkdown(
+          normalizeGithubHtml(normalizeGfmTables(md)),
+        );
+        lastMdRef.current = base;
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return;
+        // 不 suppress：让 change 正常进入 history，便于撤销 AI 结果
+        applyMarkdown(c, base, false);
+        const host = rootRef.current;
+        if (host) void rewriteHtmlImgSrcs(host, docAbsRef.current);
       },
       focus: () => {
         rootRef.current
@@ -448,6 +487,49 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           return false;
         }
       },
+      openFormulaInsert: (kind: FormulaDisplayKind = "inline") => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return;
+        try {
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const from = view.state.selection.from;
+            setFormulaReq({
+              kind: kind === "block" ? "insert-block" : "insert-inline",
+              pos: from,
+              latex: "",
+            });
+          });
+        } catch {
+          setFormulaReq({
+            kind: kind === "block" ? "insert-block" : "insert-inline",
+            pos: 0,
+            latex: "",
+          });
+        }
+      },
+      insertMermaidAtCursor: () => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        try {
+          c.editor.action((ctx) => {
+            const commands = ctx.get(commandsCtx);
+            const view = ctx.get(editorViewCtx);
+            const codeBlock = codeBlockSchema.type(ctx);
+            commands.call(clearTextInCurrentBlockCommand.key);
+            commands.call(setBlockTypeCommand.key, {
+              nodeType: codeBlock,
+              attrs: { language: "mermaid" },
+            });
+            const { state, dispatch } = view;
+            const { from } = state.selection;
+            dispatch(state.tr.insertText(DEFAULT_MERMAID_TEMPLATE, from));
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      },
     }));
 
     useEffect(() => {
@@ -623,10 +705,21 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             suppressRef.current = Math.max(0, suppressRef.current - 1);
           }, 0);
         }
+        const host = rootRef.current;
+        if (host) {
+          formulaDisposeRef.current?.();
+          formulaDisposeRef.current = attachFormulaVisualEdit(
+            host,
+            crepe,
+            (req) => setFormulaReq(req),
+          );
+        }
       });
       return () => {
         disposed = true;
         readyRef.current = false;
+        formulaDisposeRef.current?.();
+        formulaDisposeRef.current = null;
         void crepe.destroy();
         crepeRef.current = null;
       };
@@ -707,16 +800,41 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
     }, [typewriterMode]);
 
     return (
-      <div
-        ref={rootRef}
-        className={[
-          className ?? "crepe-host",
-          focusMode ? "is-focus" : "",
-          typewriterMode ? "is-typewriter" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-      />
+      <>
+        <div
+          ref={rootRef}
+          className={[
+            className ?? "crepe-host",
+            focusMode ? "is-focus" : "",
+            typewriterMode ? "is-typewriter" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        />
+        <FormulaVisualEditor
+          open={!!formulaReq}
+          initialLatex={formulaReq?.latex ?? ""}
+          initialKind={
+            formulaReq ? formulaRequestDisplayKind(formulaReq) : "inline"
+          }
+          isInsert={formulaReq ? isFormulaInsertRequest(formulaReq) : false}
+          title={
+            formulaReq &&
+            (formulaReq.kind === "block" ||
+              formulaReq.kind === "insert-block")
+              ? "可视化公式（块级）"
+              : "可视化公式"
+          }
+          onCancel={() => setFormulaReq(null)}
+          onConfirm={(latex, kind) => {
+            const crepe = crepeRef.current;
+            const req = formulaReq;
+            setFormulaReq(null);
+            if (!crepe || !req) return;
+            applyFormulaLatex(crepe, req, latex, kind);
+          }}
+        />
+      </>
     );
   },
 );

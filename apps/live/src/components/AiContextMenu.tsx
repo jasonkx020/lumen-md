@@ -8,12 +8,24 @@ import { platformShortcut } from "../platform";
 
 export type EditMenuAction = "cut" | "copy" | "paste" | "selectAll";
 
+export type InsertMenuAction =
+  | "formulaInline"
+  | "formulaBlock"
+  | "mermaid"
+  | "table"
+  | "codeBlock"
+  | "image"
+  | "hr";
+
 type Props = {
   x: number;
   y: number;
   open: boolean;
   hasKey: boolean;
   hasSelection: boolean;
+  /** 所见即所得时显示插入分组 */
+  showInsert?: boolean;
+  onInsert?: (id: InsertMenuAction) => void;
   /** 即时能力：空 note 一键跑 */
   onRun: (id: AiCapabilityId) => void;
   /** 打开完整 AI 面板（可写补充说明） */
@@ -24,9 +36,18 @@ type Props = {
 };
 
 const PAD = 8;
-/** 编辑项 + 分隔 + 少量即时 AI + 打开面板 */
 const EST_W = 220;
-const EST_H = 320;
+const EST_H = 480;
+
+const INSERT_ITEMS: { id: InsertMenuAction; label: string }[] = [
+  { id: "formulaInline", label: "行内公式 $…$" },
+  { id: "formulaBlock", label: "块级公式" },
+  { id: "mermaid", label: "Mermaid 图" },
+  { id: "table", label: "表格" },
+  { id: "codeBlock", label: "代码块" },
+  { id: "image", label: "图片" },
+  { id: "hr", label: "分隔线" },
+];
 
 function clampPos(
   x: number,
@@ -51,6 +72,8 @@ export function AiContextMenu({
   open,
   hasKey,
   hasSelection,
+  showInsert = false,
+  onInsert,
   onRun,
   onOpenAiPanel,
   onEdit,
@@ -89,12 +112,17 @@ export function AiContextMenu({
         )
       : clampPos(x, y, EST_W, EST_H);
     setPos(next);
-  }, [open, x, y, hasKey]);
+  }, [open, x, y, hasKey, showInsert]);
 
   if (!open) return null;
 
   const edit = (action: EditMenuAction) => {
     onEdit(action);
+    onClose();
+  };
+
+  const insert = (id: InsertMenuAction) => {
+    onInsert?.(id);
     onClose();
   };
 
@@ -149,6 +177,23 @@ export function AiContextMenu({
           {platformShortcut("Ctrl+A")}
         </span>
       </button>
+
+      {showInsert && onInsert ? (
+        <>
+          <div className="ai-context-sep" />
+          <div className="ai-context-section-label">插入</div>
+          {INSERT_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="ai-context-item"
+              onClick={() => insert(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </>
+      ) : null}
 
       <div className="ai-context-sep" />
 

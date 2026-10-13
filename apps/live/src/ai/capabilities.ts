@@ -1,6 +1,4 @@
 export type AiCapabilityId =
-  | "html_to_md"
-  | "md_to_html"
   | "polish"
   | "rewrite_selection"
   | "optimize_document"
@@ -35,33 +33,6 @@ const COMMON_TAIL = `
 `.trim();
 
 export const AI_CAPABILITIES: AiCapability[] = [
-  {
-    id: "html_to_md",
-    label: "HTML 转 Markdown",
-    description: "适合含 HTML 的文档，转为标准 MD",
-    scope: "full",
-    systemPrompt: `你是 Markdown 转换助手。将用户给出的内容中的 HTML 转为等价的标准 Markdown。
-规则：
-- 保留标题、列表、表格、链接、强调等语义
-- 去除 script、iframe、onclick 等危险内容
-- 无法安全表示的标签可降级为纯文本
-- 若几乎没有 HTML，做轻度 Markdown 规范化
-${COMMON_TAIL}`,
-  },
-  {
-    id: "md_to_html",
-    label: "Markdown 转 HTML",
-    description: "将 Markdown 转为语义化 HTML 片段",
-    scope: "selection_preferred",
-    systemPrompt: `你是 HTML 转换助手。将用户给出的 Markdown 转为等价、语义清晰的 HTML。
-规则：
-- 使用标准标签：h1–h6、p、ul/ol/li、table、pre/code、blockquote、a、strong/em、hr 等
-- 保留标题层级、列表、表格、链接与强调；代码块用 <pre><code>
-- 不要输出 script、iframe、onclick、javascript: 等危险内容
-- 只输出 HTML 片段（不要 <!DOCTYPE> / <html> / <head> / <body> 外壳，除非用户明确要求完整页面）
-- 不要用 markdown 代码围栏包裹整篇输出
-${COMMON_TAIL}`,
-  },
   {
     id: "polish",
     label: "润色",
@@ -181,10 +152,6 @@ export function getQuickCapabilities(): AiCapability[] {
   return AI_CAPABILITIES.filter((c) => c.quickAction);
 }
 
-export function detectHtml(text: string): boolean {
-  return /<\/?[a-zA-Z][^>]*>/.test(text);
-}
-
 export type ResolveScopeInput = {
   markdown: string;
   selection: string | null;
@@ -219,17 +186,6 @@ export function resolveCapabilityContent(
 ): ResolveScopeResult {
   const sel = input.selection?.trim() ? input.selection : null;
   switch (id) {
-    case "html_to_md": {
-      if (sel && detectHtml(sel)) {
-        return { content: sel, replaceSelection: true };
-      }
-      const warn = detectHtml(input.markdown)
-        ? undefined
-        : "未检测到明显 HTML，仍将尝试规范化";
-      return { content: input.markdown, replaceSelection: false, warn };
-    }
-    case "md_to_html":
-      return selectionPreferred(input);
     case "polish":
       return selectionOrThrow(sel, "请先选中要润色的文本");
     case "rewrite_selection":

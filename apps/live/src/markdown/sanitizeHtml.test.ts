@@ -9,6 +9,7 @@ import { runGithubHtmlSelfCheck } from "./githubHtml.selfcheck";
 import { runPictureThemeSelfCheck } from "./pictureTheme.selfcheck";
 import { runMermaidNormalizeSelfCheck } from "../diagrams/mermaidNormalize.selfcheck";
 import { runMermaidEditSelfCheck } from "../diagrams/mermaidEdit.selfcheck";
+import { runMathExportSelfCheck } from "../export/mathExport.selfcheck";
 
 export function runSanitizeSelfCheck(): string[] {
   const errors: string[] = [];
@@ -94,6 +95,7 @@ export function runSanitizeSelfCheck(): string[] {
   errors.push(...runPictureThemeSelfCheck().map((e) => `pictureTheme:${e}`));
   errors.push(...runMermaidNormalizeSelfCheck().map((e) => `mermaid:${e}`));
   errors.push(...runMermaidEditSelfCheck().map((e) => `mermaidEdit:${e}`));
+  errors.push(...runMathExportSelfCheck().map((e) => `mathExport:${e}`));
 
   return errors;
 }

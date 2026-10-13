@@ -73,6 +73,9 @@ fn gfm_options() -> Options<'static> {
     options.extension.tasklist = true;
     options.extension.autolink = true;
     options.extension.footnotes = true;
+    // $…$ / $$…$$；`$`…`$` / ```math
+    options.extension.math_dollars = true;
+    options.extension.math_code = true;
     // 给 h1–h6 生成 id，便于 PDF 书签 / 锚点
     options.extension.header_ids = Some(String::new());
     options
@@ -490,11 +493,45 @@ body {{
 .footnote-ref {{ font-size: 0.75em; vertical-align: super; }}
 .footnotes {{ margin-top: 2em; border-top: 1px solid var(--border); padding-top: 0.5em; font-size: 0.9em; }}
 .mermaid-export {{ text-align: center; margin: 1em 0; }}
+.katex-display {{ margin: 1em 0; overflow-x: auto; overflow-y: hidden; }}
+.markdown-body span[data-math-style],
+.markdown-body code[data-math-style] {{ font-family: KaTeX_Main, "Times New Roman", serif; }}
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css"/>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
 (function () {{
-  function run() {{
+  function renderKatex() {{
+    if (!window.katex) return;
+    var nodes = document.querySelectorAll("[data-math-style]");
+    nodes.forEach(function (el) {{
+      if (el.dataset.katexDone === "1") return;
+      var tex = (el.textContent || "").trim();
+      if (!tex) return;
+      var display = (el.getAttribute("data-math-style") || "") === "display";
+      try {{
+        var html = katex.renderToString(tex, {{
+          displayMode: display,
+          throwOnError: false,
+          strict: "ignore",
+        }});
+        if (display && el.tagName === "CODE" && el.parentElement && el.parentElement.tagName === "PRE") {{
+          var host = document.createElement("div");
+          host.className = "katex-display-host";
+          host.innerHTML = html;
+          el.parentElement.parentNode.insertBefore(host, el.parentElement);
+          el.parentElement.style.display = "none";
+        }} else {{
+          el.innerHTML = html;
+        }}
+        el.dataset.katexDone = "1";
+      }} catch (e) {{
+        /* keep original tex */
+      }}
+    }});
+  }}
+  function runMermaid() {{
     if (!window.mermaid) return;
     mermaid.initialize({{ startOnLoad: false, securityLevel: "strict", theme: "neutral" }});
     var blocks = document.querySelectorAll("pre > code.language-mermaid, pre code.language-mermaid, pre[data-language='mermaid'] code, code.language-mermaid");
@@ -518,8 +555,19 @@ body {{
       }});
     }});
   }}
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
-  else run();
+  function boot() {{
+    renderKatex();
+    runMermaid();
+  }}
+  function waitKatex(n) {{
+    if (window.katex || n <= 0) {{ boot(); return; }}
+    setTimeout(function () {{ waitKatex(n - 1); }}, 50);
+  }}
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", function () {{ waitKatex(80); }});
+  }} else {{
+    waitKatex(80);
+  }}
 }})();
 </script>
 </head>
@@ -2021,6 +2069,53 @@ after
         assert!(
             xml.contains("drawing") || xml.contains("blip") || xml.contains("a:blip"),
             "document should reference drawing/blip for image"
+        );
+    }
+
+    #[test]
+    fn github_html_emits_math_and_loads_katex() {
+        let md = "能量 $E=mc^2$ 与\n\n$$\\int_0^1 x\\,dx$$\n";
+        let html = markdown_to_github_html(md).unwrap();
+        assert!(
+            html.contains("data-math-style"),
+            "expected comrak math spans: {}",
+            &html.chars().take(800).collect::<String>()
+        );
+        assert!(
+            html.contains("katex"),
+            "standalone HTML should load KaTeX"
+        );
+        assert!(
+            html.contains("E=mc^2") || html.contains("E=mc"),
+            "inline math literal should appear before client render"
+        );
+    }
+
+    #[test]
+    fn docx_embeds_math_placeholder_via_overrides() {
+        // 1×1 PNG
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xFE,
+            0xD4, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "__lumen_math__/0.png".into(),
+            format!("data:image/png;base64,{b64}"),
+        );
+        let ctx = ExportAssetCtx::default().with_image_overrides(
+            crate::export_assets::parse_image_overrides(Some(overrides)),
+        );
+        let md = r#"公式 <img src="__lumen_math__/0.png" alt="E=mc^2" /> 结束"#;
+        let bytes = markdown_to_docx_bytes_with_ctx(md, &ctx).expect("docx");
+        assert!(
+            docx_has_media_png(&bytes),
+            "math placeholder PNG should be embedded from overrides"
         );
     }
 }

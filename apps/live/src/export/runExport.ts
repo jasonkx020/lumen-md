@@ -1,6 +1,7 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { exportMdToDocx, exportMdToHtml, exportMdToPdf } from "../api";
 import { captureRenderedImages } from "./captureRenderedImages";
+import { renderMathForDocx } from "./renderMathForDocx";
 
 export type ExportKind = "pdf" | "docx" | "html";
 
@@ -52,9 +53,11 @@ export async function runExport(args: {
   });
   if (!path) return "cancelled";
   args.onWorkStart?.();
-  const imageOverrides = await captureRenderedImages(args.editorHost);
+  const math = await renderMathForDocx(args.markdown);
+  const captured = await captureRenderedImages(args.editorHost);
+  const imageOverrides = { ...captured, ...math.imageOverrides };
   await exportMdToDocx(
-    args.markdown,
+    math.markdown,
     path,
     docAbs,
     Object.keys(imageOverrides).length > 0 ? imageOverrides : null,
