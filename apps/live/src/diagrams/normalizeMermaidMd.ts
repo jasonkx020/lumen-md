@@ -24,6 +24,30 @@ export function prepareMermaidSource(code: string): string {
 }
 
 /**
+ * 从 AI/粘贴文本中抽出 Mermaid 源码（允许围栏前后有说明文字）。
+ * Diff 预览与「启用结果」插入必须共用此逻辑，避免识别不一致。
+ */
+export function extractMermaidSource(text: string): string | null {
+  const t = text.trim().replace(/\r\n/g, "\n");
+  if (!t) return null;
+  const fence = t.match(/```\s*mermaid[^\n]*\r?\n([\s\S]*?)(?:\r?\n)```/i);
+  if (fence) {
+    const body = prepareMermaidSource(fence[1] ?? "");
+    return body || null;
+  }
+  // 闭合围栏前缺换行：```mermaid\n...\```
+  const loose = t.match(/```\s*mermaid[^\n]*\r?\n([\s\S]*?)```/i);
+  if (loose) {
+    const body = prepareMermaidSource(loose[1] ?? "");
+    if (body && looksLikeMermaidDiagram(body)) return body;
+  }
+  const bare = t.replace(/^mermaid\s*\n/i, "").trim();
+  if (looksLikeMermaidDiagram(bare)) return prepareMermaidSource(bare);
+  if (looksLikeMermaidDiagram(t)) return prepareMermaidSource(t);
+  return null;
+}
+
+/**
  * 对 markdown 中的 fenced code：
  * - lang=mermaid：去掉 body 内 `\[` `\]`
  * - 无 lang / text / txt：若 body 像图，同样 unescape，并补上 `mermaid` 语言标签

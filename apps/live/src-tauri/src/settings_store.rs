@@ -17,6 +17,7 @@ pub enum LlmPlatform {
     Zhipu,
     Openai,
     Qwen,
+    Volcengine,
     Ollama,
 }
 
@@ -27,6 +28,7 @@ impl LlmPlatform {
             LlmPlatform::Zhipu => "zhipu",
             LlmPlatform::Openai => "openai",
             LlmPlatform::Qwen => "qwen",
+            LlmPlatform::Volcengine => "volcengine",
             LlmPlatform::Ollama => "ollama",
         }
     }
@@ -36,6 +38,7 @@ impl LlmPlatform {
             "zhipu" | "glm" | "智谱" => LlmPlatform::Zhipu,
             "openai" | "chatgpt" | "gpt" => LlmPlatform::Openai,
             "qwen" | "tongyi" | "千问" => LlmPlatform::Qwen,
+            "volcengine" | "ark" | "doubao" | "火山" | "豆包" => LlmPlatform::Volcengine,
             "ollama" | "olama" | "本地" => LlmPlatform::Ollama,
             _ => LlmPlatform::Deepseek,
         }
@@ -47,6 +50,8 @@ impl LlmPlatform {
             LlmPlatform::Zhipu => "glm-4-flash",
             LlmPlatform::Openai => "gpt-4o-mini",
             LlmPlatform::Qwen => "qwen-plus",
+            // 须用带版本号的模型 ID，或控制台接入点 ep-…；族名易 NotFound
+            LlmPlatform::Volcengine => "doubao-seed-1-6-251015",
             LlmPlatform::Ollama => "llama3.2",
         }
     }
@@ -57,59 +62,13 @@ impl LlmPlatform {
             LlmPlatform::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
             LlmPlatform::Openai => "https://api.openai.com/v1",
             LlmPlatform::Qwen => "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            LlmPlatform::Volcengine => "https://ark.cn-beijing.volces.com/api/v3",
             LlmPlatform::Ollama => "http://127.0.0.1:11434/v1",
         }
     }
 
     pub fn requires_api_key(self) -> bool {
         !matches!(self, LlmPlatform::Ollama)
-    }
-}
-
-/// 启发式判断当前模型是否支持视觉多模态（OpenAI 兼容 vision）。
-pub fn model_supports_vision(platform: LlmPlatform, model: &str) -> bool {
-    let m = model.trim().to_lowercase();
-    if m.is_empty() {
-        return false;
-    }
-    // 明显纯文本
-    if m.contains("gpt-3.5") || m == "deepseek-chat" || m == "deepseek-reasoner" {
-        return false;
-    }
-
-    match platform {
-        LlmPlatform::Openai => {
-            m.contains("gpt-4o")
-                || m.contains("gpt-4.1")
-                || m.contains("gpt-4-turbo")
-                || m.contains("gpt-4-vision")
-                || m.starts_with("o1")
-                || m.starts_with("o3")
-                || m.starts_with("o4")
-                || m.contains("vision")
-        }
-        LlmPlatform::Zhipu => {
-            m.contains("glm-4v") || m.contains("glm-4.1v") || m.contains("glm-4v-")
-        }
-        LlmPlatform::Qwen => {
-            m.contains("qwen-vl")
-                || m.contains("qwen2-vl")
-                || m.contains("qwen2.5-vl")
-                || m.contains("qwen3-vl")
-                || m.contains("qwen2.5vl")
-        }
-        LlmPlatform::Deepseek => m.contains("deepseek-vl"),
-        LlmPlatform::Ollama => {
-            m.contains("llava")
-                || m.contains("bakllava")
-                || m.contains("moondream")
-                || m.contains("minicpm-v")
-                || m.contains("qwen2.5vl")
-                || m.contains("qwen2-vl")
-                || m.contains("qwen2.5-vl")
-                || m.contains("gemma3")
-                || m.contains("vision")
-        }
     }
 }
 
@@ -214,6 +173,9 @@ pub struct Prefs {
     pub focus_mode: bool,
     #[serde(default)]
     pub typewriter_mode: bool,
+    /// 用户手动启用多模态（贴图 / 图片转 Markdown）；不自动按模型名推断。
+    #[serde(default)]
+    pub multimodal_enabled: bool,
     /// workspace | beside
     #[serde(default = "default_asset_mode")]
     pub asset_mode: String,
@@ -262,6 +224,7 @@ impl Default for Prefs {
             recent: Vec::new(),
             focus_mode: false,
             typewriter_mode: false,
+            multimodal_enabled: false,
             asset_mode: default_asset_mode(),
             assets_dir: default_assets_dir(),
             user_css: String::new(),
@@ -292,6 +255,7 @@ pub struct SettingsSetReq {
     pub base_url: Option<String>,
     pub focus_mode: Option<bool>,
     pub typewriter_mode: Option<bool>,
+    pub multimodal_enabled: Option<bool>,
     pub asset_mode: Option<String>,
     pub assets_dir: Option<String>,
     pub user_css: Option<String>,
@@ -522,7 +486,7 @@ pub fn settings_view() -> SettingsView {
         base_url: resolve_base_url(&prefs),
         theme: normalize_theme(&prefs.theme),
         requires_api_key: prefs.platform.requires_api_key(),
-        supports_multimodal: model_supports_vision(prefs.platform, &prefs.model),
+        supports_multimodal: prefs.multimodal_enabled,
         recent: prefs.recent.clone(),
         focus_mode: prefs.focus_mode,
         typewriter_mode: prefs.typewriter_mode,
@@ -579,6 +543,7 @@ pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
                 || prefs.model == LlmPlatform::Zhipu.default_model()
                 || prefs.model == LlmPlatform::Openai.default_model()
                 || prefs.model == LlmPlatform::Qwen.default_model()
+                || prefs.model == LlmPlatform::Volcengine.default_model()
                 || prefs.model == LlmPlatform::Ollama.default_model()
             {
                 prefs.model = platform.default_model().into();
@@ -605,6 +570,9 @@ pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
     }
     if let Some(v) = req.typewriter_mode {
         prefs.typewriter_mode = v;
+    }
+    if let Some(v) = req.multimodal_enabled {
+        prefs.multimodal_enabled = v;
     }
     if let Some(m) = req.asset_mode.as_deref() {
         let m = m.trim().to_lowercase();

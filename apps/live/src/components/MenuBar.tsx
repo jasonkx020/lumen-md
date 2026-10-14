@@ -61,6 +61,7 @@ export type MenuAction =
   | "toggleExamSeal"
   | `theme:${ThemeId}`
   | "openSettings"
+  | "openLlmSettings"
   | "about"
   | `recent:${string}`;
 
@@ -175,6 +176,7 @@ const MENUS: MenuDef[] = [
     label: "设置",
     items: [
       { type: "item", label: "首选项…", action: "openSettings" },
+      { type: "item", label: "大模型配置…", action: "openLlmSettings" },
     ],
   },
   {

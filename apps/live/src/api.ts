@@ -125,6 +125,7 @@ export async function settingsSet(args: {
   baseUrl?: string | null;
   focusMode?: boolean;
   typewriterMode?: boolean;
+  multimodalEnabled?: boolean;
   assetMode?: string;
   assetsDir?: string;
   userCss?: string | null;
@@ -150,6 +151,7 @@ export async function settingsSet(args: {
       baseUrl: args.baseUrl ?? null,
       focusMode: args.focusMode ?? null,
       typewriterMode: args.typewriterMode ?? null,
+      multimodalEnabled: args.multimodalEnabled ?? null,
       assetMode: args.assetMode ?? null,
       assetsDir: args.assetsDir ?? null,
       userCss: args.userCss ?? null,

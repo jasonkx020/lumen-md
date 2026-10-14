@@ -2,6 +2,7 @@
  * Mermaid 规范化自检（无需浏览器 DOM）。
  */
 import {
+  extractMermaidSource,
   looksLikeMermaidDiagram,
   normalizeMermaidFencesInMarkdown,
   prepareMermaidSource,
@@ -81,6 +82,16 @@ export function runMermaidNormalizeSelfCheck(): string[] {
   const norm2 = normalizeMermaidFencesInMarkdown(already);
   if (!norm2.includes("A[x]")) {
     errors.push("mermaid-lang fence unescape failed");
+  }
+
+  const withPreamble =
+    "好的，流程图如下：\n\n```mermaid\nflowchart LR\nA-->B\n```\n";
+  const extracted = extractMermaidSource(withPreamble);
+  if (extracted !== "flowchart LR\nA-->B") {
+    errors.push(`extractMermaidSource preamble failed: ${JSON.stringify(extracted)}`);
+  }
+  if (!extractMermaidSource("flowchart TB\nA-->B")) {
+    errors.push("extractMermaidSource bare diagram failed");
   }
 
   return errors;

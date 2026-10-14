@@ -206,29 +206,25 @@ export function AiContextMenu({
             onClose();
           }}
         >
-          配置 API Key…
+          配置大模型…
         </button>
-      ) : (
+      ) : hasSelection ? (
         <>
-          {quick.map((c) => {
-            const needSel = c.scope === "selection_required";
-            const disabled = needSel && !hasSelection;
-            return (
-              <button
-                key={c.id}
-                type="button"
-                className="ai-context-item"
-                disabled={disabled}
-                title={disabled ? "请先选中文本" : c.description}
-                onClick={() => {
-                  onRun(c.id);
-                  onClose();
-                }}
-              >
-                {c.label}
-              </button>
-            );
-          })}
+          <div className="ai-context-section-label">AI 写作</div>
+          {quick.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              className="ai-context-item"
+              title={c.description}
+              onClick={() => {
+                onRun(c.id);
+                onClose();
+              }}
+            >
+              {c.label}
+            </button>
+          ))}
           <div className="ai-context-sep" />
           <button
             type="button"
@@ -238,7 +234,21 @@ export function AiContextMenu({
               onClose();
             }}
           >
-            在 AI 面板中打开…
+            在助手中打开…
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="ai-context-section-label">AI</div>
+          <button
+            type="button"
+            className="ai-context-item"
+            onClick={() => {
+              onOpenAiPanel();
+              onClose();
+            }}
+          >
+            打开助手（学科生成）…
           </button>
         </>
       )}

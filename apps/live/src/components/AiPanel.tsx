@@ -1,16 +1,32 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
+  useState,
 } from "react";
 import {
-  AI_CAPABILITIES,
+  AI_MODES,
+  getCapabilitiesByMode,
+  getMoreCapabilities,
   type AiCapabilityId,
+  type AiMode,
 } from "../ai/capabilities";
+import {
+  CHANGE_TONES,
+  getDefaultChangeTone,
+  getDefaultTranslateLang,
+  setDefaultChangeTone,
+  setDefaultTranslateLang,
+  toneChoiceNote,
+  translateChoiceNote,
+  TRANSLATE_LANGS,
+} from "../ai/choiceOptions";
 
 export type AiPanelHandle = {
   focusNote: () => void;
+  setMode: (mode: AiMode) => void;
 };
 
 const MAX_IMAGES = 3;
@@ -19,14 +35,15 @@ type Props = {
   hasKey: boolean;
   keyInvalid?: boolean;
   busy: boolean;
-  selectedId: AiCapabilityId;
+  mode: AiMode;
   note: string;
   supportsMultimodal: boolean;
   images: string[];
-  onSelect: (id: AiCapabilityId) => void;
+  onModeChange: (mode: AiMode) => void;
   onNoteChange: (note: string) => void;
   onImagesChange: (images: string[]) => void;
-  onRun: () => void;
+  /** 一点即跑；翻译/改语气会带上选项 note */
+  onRun: (id: AiCapabilityId, note?: string) => void;
   onOpenSettings: () => void;
   statusText?: string;
 };
@@ -40,16 +57,18 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+type ChoiceMenu = "translate" | "change_tone" | null;
+
 export const AiPanel = forwardRef<AiPanelHandle, Props>(function AiPanel(
   {
     hasKey,
     keyInvalid,
     busy,
-    selectedId,
+    mode,
     note,
     supportsMultimodal,
     images,
-    onSelect,
+    onModeChange,
     onNoteChange,
     onImagesChange,
     onRun,
@@ -60,19 +79,49 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(function AiPanel(
 ) {
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [choiceMenu, setChoiceMenu] = useState<ChoiceMenu>(null);
+  const [translateLang, setTranslateLang] = useState(getDefaultTranslateLang);
+  const [changeTone, setChangeTone] = useState(getDefaultChangeTone);
   const blocked = !hasKey || !!keyInvalid;
-  const caps = AI_CAPABILITIES.filter(
-    (c) => !c.requiresMultimodal || supportsMultimodal,
-  );
-  const selected = AI_CAPABILITIES.find((c) => c.id === selectedId);
-  const needsImage = !!selected?.requiresMultimodal;
+
+  const mainCaps = getCapabilitiesByMode(mode);
+  const moreCaps = mode === "write" ? getMoreCapabilities() : [];
 
   useImperativeHandle(ref, () => ({
     focusNote: () => {
-      noteRef.current?.focus();
-      noteRef.current?.scrollIntoView({ block: "nearest" });
+      setNoteOpen(true);
+      requestAnimationFrame(() => {
+        noteRef.current?.focus();
+        noteRef.current?.scrollIntoView({ block: "nearest" });
+      });
     },
+    setMode: (m) => onModeChange(m),
   }));
+
+  useEffect(() => {
+    if (!choiceMenu) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (moreRef.current?.contains(t)) return;
+      setChoiceMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setChoiceMenu(null);
+    };
+    window.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDoc);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [choiceMenu]);
+
+  useEffect(() => {
+    if (busy) setChoiceMenu(null);
+  }, [busy]);
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -95,7 +144,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(function AiPanel(
 
   const onPasteImages = useCallback(
     (e: React.ClipboardEvent) => {
-      if (!supportsMultimodal || busy) return;
+      if (!supportsMultimodal || busy || mode !== "delivery") return;
       const items = e.clipboardData?.items;
       if (!items) return;
       const files: File[] = [];
@@ -109,8 +158,39 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(function AiPanel(
       e.preventDefault();
       void addFiles(files);
     },
-    [addFiles, busy, supportsMultimodal],
+    [addFiles, busy, mode, supportsMultimodal],
   );
+
+  const pickTranslate = (lang: string) => {
+    setDefaultTranslateLang(lang);
+    setTranslateLang(lang);
+    setChoiceMenu(null);
+    const choice = translateChoiceNote(lang);
+    const merged = [choice, note.trim()].filter(Boolean).join("\n");
+    onRun("translate", merged);
+  };
+
+  const pickTone = (tone: string) => {
+    setDefaultChangeTone(tone);
+    setChangeTone(tone);
+    setChoiceMenu(null);
+    const choice = toneChoiceNote(tone);
+    const merged = [choice, note.trim()].filter(Boolean).join("\n");
+    onRun("change_tone", merged);
+  };
+
+  const onMoreCapClick = (id: AiCapabilityId) => {
+    if (id === "translate") {
+      setChoiceMenu((m) => (m === "translate" ? null : "translate"));
+      return;
+    }
+    if (id === "change_tone") {
+      setChoiceMenu((m) => (m === "change_tone" ? null : "change_tone"));
+      return;
+    }
+    setChoiceMenu(null);
+    onRun(id);
+  };
 
   return (
     <div className="ai-pane" onPaste={onPasteImages}>
@@ -123,108 +203,216 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(function AiPanel(
               : "尚未配置可用的 API Key。"}
           </p>
           <p className="ai-cta-hint">
-            请到菜单「设置 → AI 平台」中配置 Key 后使用。
+            请到菜单「设置 → 大模型配置」中配置 Key 后使用。
           </p>
           <button type="button" className="primary" onClick={onOpenSettings}>
-            去设置中配置
+            去配置大模型
           </button>
         </div>
       ) : (
         <>
-          <div className="ai-caps">
-            {caps.map((c) => (
+          <div className="ai-mode-tabs" role="tablist" aria-label="助手模式">
+            {AI_MODES.map((m) => (
               <button
-                key={c.id}
+                key={m.id}
                 type="button"
-                className={
-                  "ai-cap-btn" + (selectedId === c.id ? " is-active" : "")
-                }
-                title={c.description}
+                role="tab"
+                aria-selected={mode === m.id}
+                className={"ai-mode-tab" + (mode === m.id ? " is-active" : "")}
                 disabled={busy}
-                onClick={() => onSelect(c.id)}
+                onClick={() => onModeChange(m.id)}
               >
-                {c.label}
+                {m.label}
               </button>
             ))}
           </div>
-          <p className="ai-cap-desc">{selected?.description}</p>
-          {supportsMultimodal ? (
-            <div className="ai-images">
-              <div className="ai-images-head">
-                <span>附图（可选，最多 {MAX_IMAGES} 张）</span>
+
+          <div className="ai-caps">
+            {mainCaps.map((c) => {
+              const needsImage = !!c.requiresMultimodal;
+              const imageBlocked = needsImage && images.length === 0;
+              const mmBlocked = needsImage && !supportsMultimodal;
+              return (
                 <button
+                  key={c.id}
                   type="button"
-                  className="ai-images-add"
-                  disabled={busy || images.length >= MAX_IMAGES}
-                  onClick={() => fileRef.current?.click()}
+                  className="ai-cap-btn ai-cap-run"
+                  title={c.description}
+                  disabled={busy || imageBlocked || mmBlocked}
+                  onClick={() => onRun(c.id)}
                 >
-                  添加图片
+                  <span className="ai-cap-run-label">{c.label}</span>
+                  <span className="ai-cap-run-hint">{c.description}</span>
                 </button>
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    if (e.target.files) void addFiles(e.target.files);
-                    e.target.value = "";
-                  }}
-                />
-              </div>
-              <p className="ai-images-hint">
-                可在本面板内粘贴截图；当前模型支持多模态
-              </p>
-              {images.length > 0 ? (
-                <ul className="ai-image-list">
-                  {images.map((src, i) => (
-                    <li key={`${i}-${src.slice(0, 32)}`}>
-                      <img src={src} alt={`附图 ${i + 1}`} />
-                      <button
-                        type="button"
-                        className="ai-image-remove"
-                        disabled={busy}
-                        title="移除"
-                        onClick={() =>
-                          onImagesChange(images.filter((_, j) => j !== i))
-                        }
-                      >
-                        ×
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
+              );
+            })}
+          </div>
+
+          {moreCaps.length > 0 ? (
+            <div className="ai-more" ref={moreRef}>
+              <button
+                type="button"
+                className="ai-more-toggle"
+                disabled={busy}
+                onClick={() => {
+                  setMoreOpen((v) => !v);
+                  setChoiceMenu(null);
+                }}
+              >
+                {moreOpen ? "收起更多文本工具" : "更多文本工具"}
+              </button>
+              {moreOpen
+                ? moreCaps.map((c) => {
+                    const isTranslate = c.id === "translate";
+                    const isTone = c.id === "change_tone";
+                    const meta = isTranslate
+                      ? translateLang
+                      : isTone
+                        ? changeTone
+                        : null;
+                    const menuOpen =
+                      (isTranslate && choiceMenu === "translate") ||
+                      (isTone && choiceMenu === "change_tone");
+                    return (
+                      <div key={c.id} className="ai-cap-choice-wrap">
+                        <button
+                          type="button"
+                          className={
+                            "ai-cap-btn ai-cap-choice" +
+                            (menuOpen ? " is-open" : "")
+                          }
+                          title={c.description}
+                          disabled={busy}
+                          aria-expanded={menuOpen}
+                          aria-haspopup="listbox"
+                          onClick={() => onMoreCapClick(c.id)}
+                        >
+                          <span className="ai-cap-choice-label">{c.label}</span>
+                          {meta ? (
+                            <span className="ai-cap-choice-meta">{meta}</span>
+                          ) : null}
+                        </button>
+                        {menuOpen ? (
+                          <div
+                            className="ai-cap-dropdown"
+                            role="listbox"
+                            aria-label={
+                              isTranslate ? "目标语言" : "目标语气"
+                            }
+                          >
+                            {(isTranslate ? TRANSLATE_LANGS : CHANGE_TONES).map(
+                              (opt) => (
+                                <button
+                                  key={opt}
+                                  type="button"
+                                  role="option"
+                                  className={
+                                    "ai-cap-dropdown-item" +
+                                    (opt === meta ? " is-active" : "")
+                                  }
+                                  aria-selected={opt === meta}
+                                  onClick={() =>
+                                    isTranslate
+                                      ? pickTranslate(opt)
+                                      : pickTone(opt)
+                                  }
+                                >
+                                  {opt}
+                                </button>
+                              ),
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                : null}
             </div>
-          ) : (
-            <p className="ai-mm-off">
-              当前模型为纯文本，贴图已关闭。可在设置中换用视觉模型（如
-              gpt-4o-mini、glm-4v-flash、qwen-vl-plus、llava）。
-            </p>
-          )}
-          <label className="ai-note-label">
-            用户补充说明（可选）
-            <textarea
-              ref={noteRef}
-              value={note}
-              onChange={(e) => onNoteChange(e.target.value)}
-              rows={3}
-              disabled={busy}
-              placeholder="例如：语气更正式、译为英文、保留英文术语…"
-            />
-          </label>
-          {needsImage && images.length === 0 ? (
-            <p className="ai-status">请先添加至少一张图片</p>
           ) : null}
-          <button
-            type="button"
-            className="primary ai-run"
-            disabled={busy || (needsImage && images.length === 0)}
-            onClick={onRun}
-          >
-            {busy ? "处理中…" : "运行"}
-          </button>
+
+          {mode === "delivery" ? (
+            supportsMultimodal ? (
+              <div className="ai-images">
+                <div className="ai-images-head">
+                  <span>识图附图（最多 {MAX_IMAGES} 张）</span>
+                  <button
+                    type="button"
+                    className="ai-images-add"
+                    disabled={busy || images.length >= MAX_IMAGES}
+                    onClick={() => fileRef.current?.click()}
+                  >
+                    添加图片
+                  </button>
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      if (e.target.files) void addFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+                <p className="ai-images-hint">可在本面板内粘贴截图</p>
+                {images.length > 0 ? (
+                  <ul className="ai-image-list">
+                    {images.map((src, i) => (
+                      <li key={`${i}-${src.slice(0, 32)}`}>
+                        <img src={src} alt={`附图 ${i + 1}`} />
+                        <button
+                          type="button"
+                          className="ai-image-remove"
+                          disabled={busy}
+                          title="移除"
+                          onClick={() =>
+                            onImagesChange(images.filter((_, j) => j !== i))
+                          }
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : (
+              <p className="ai-mm-off">
+                识图需在「大模型配置」中勾选启用多模态。
+              </p>
+            )
+          ) : null}
+
+          <div className="ai-note-block">
+            <button
+              type="button"
+              className="ai-more-toggle"
+              disabled={busy}
+              onClick={() => setNoteOpen((v) => !v)}
+            >
+              {noteOpen ? "收起补充说明" : "补充说明（可选）"}
+            </button>
+            {noteOpen ? (
+              <label className="ai-note-label">
+                <textarea
+                  ref={noteRef}
+                  value={note}
+                  onChange={(e) => onNoteChange(e.target.value)}
+                  rows={3}
+                  disabled={busy}
+                  placeholder={
+                    mode === "subject"
+                      ? "描述公式/流程/表格列…（无选区时必填）"
+                      : "可选：额外要求…"
+                  }
+                />
+              </label>
+            ) : null}
+          </div>
+
           {statusText ? <p className="ai-status">{statusText}</p> : null}
+          {busy ? <p className="ai-status">处理中…</p> : null}
         </>
       )}
     </div>

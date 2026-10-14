@@ -24,7 +24,11 @@ import { upload, uploadConfig } from "@milkdown/kit/plugin/upload";
 import { codeBlockConfig } from "@milkdown/kit/component/code-block";
 import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
 import { normalizeGithubHtml } from "../markdown/normalizeGithubHtml";
-import { normalizeMermaidFencesInMarkdown } from "../diagrams/normalizeMermaidMd";
+import {
+  extractMermaidSource,
+  normalizeMermaidFencesInMarkdown,
+  prepareMermaidSource,
+} from "../diagrams/normalizeMermaidMd";
 import {
   DEFAULT_MERMAID_TEMPLATE,
   mermaidMenuIcon,
@@ -100,6 +104,8 @@ export type CrepeEditorHandle = {
   getSelection: () => string | null;
   getSelectionMeta: () => SelectionMeta | null;
   replaceSelection: (text: string) => boolean;
+  /** 在光标处插入 Markdown（可替换当前选区） */
+  insertMarkdownAtCursor: (md: string) => boolean;
   /** 用保存的 from/to 写回（对比弹窗会丢掉选区） */
   replaceRangeAt: (from: number, to: number, text: string) => boolean;
   /** 按纯文本偏移近似选中（查找用） */
@@ -110,6 +116,10 @@ export type CrepeEditorHandle = {
   openFormulaInsert: (kind?: FormulaDisplayKind) => void;
   /** 在光标处插入 Mermaid 代码块（与斜杠菜单一致） */
   insertMermaidAtCursor: () => boolean;
+  /** 在光标处插入指定源码的 Mermaid 块（AI 生成用，走代码块节点以触发预览） */
+  insertMermaidSourceAtCursor: (source: string) => boolean;
+  /** 恢复 ProseMirror 文档坐标选区（对比弹窗启用前调用） */
+  restoreSelection: (from: number, to: number) => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -286,9 +296,28 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           c.editor.action((ctx) => {
             const view = ctx.get(editorViewCtx);
             const { from, to, empty } = view.state.selection;
-            if (empty) return;
+            // 空选区也保存光标，供 insert_at_cursor 在 Diff 关闭后恢复
+            if (empty) {
+              meta = {
+                text: "",
+                from,
+                to,
+                inTableCell: false,
+                tableSelectionBlocked: false,
+              };
+              return;
+            }
             const text = view.state.doc.textBetween(from, to, "\n");
-            if (!text.trim()) return;
+            if (!text.trim()) {
+              meta = {
+                text: "",
+                from,
+                to,
+                inTableCell: false,
+                tableSelectionBlocked: false,
+              };
+              return;
+            }
             const cell = getSameTableCell(view.state.doc, from, to);
             const touches = selectionTouchesTable(view.state.doc, from, to);
             meta = {
@@ -347,6 +376,49 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
               return;
             }
             replaceRange(text, { from, to })(ctx);
+            ok = true;
+          });
+          return ok;
+        } catch {
+          return false;
+        }
+      },
+      insertMarkdownAtCursor: (md: string) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        // Mermaid：replaceRange 无法稳定得到可预览 code_block，改走围栏追加（与菜单一致）
+        const mermaidBody = extractMermaidSource(md);
+        if (mermaidBody) {
+          try {
+            const cur = c.getMarkdown();
+            applyMarkdown(
+              c,
+              `${cur.trimEnd()}\n\n\`\`\`mermaid\n${mermaidBody}\n\`\`\`\n`,
+              false,
+            );
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        const normalized = normalizeIncomingMarkdown(
+          md.trim().replace(/\r\n/g, "\n"),
+        );
+        const payload = normalized ? `\n\n${normalized}\n\n` : md;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { from, to } = view.state.selection;
+            if (selectionTouchesTable(view.state.doc, from, to)) {
+              // 表内退化为纯文本插入
+              view.dispatch(
+                view.state.tr.insertText(md.replace(/\n+/g, " "), from, to),
+              );
+              ok = true;
+              return;
+            }
+            replaceRange(payload, { from, to })(ctx);
             ok = true;
           });
           return ok;
@@ -525,6 +597,120 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             const { from } = state.selection;
             dispatch(state.tr.insertText(DEFAULT_MERMAID_TEMPLATE, from));
           });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      restoreSelection: (from: number, to: number) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const max = view.state.doc.content.size;
+            const f = Math.max(1, Math.min(from, max));
+            const t = Math.max(f, Math.min(to, max));
+            try {
+              const sel = TextSelection.create(view.state.doc, f, t);
+              view.dispatch(view.state.tr.setSelection(sel));
+              ok = true;
+            } catch {
+              const sel = TextSelection.near(view.state.doc.resolve(f));
+              view.dispatch(view.state.tr.setSelection(sel));
+              ok = true;
+            }
+            view.focus();
+          });
+          return ok;
+        } catch {
+          return false;
+        }
+      },
+      insertMermaidSourceAtCursor: (source: string) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        // 入参可以是纯源码或带围栏/前言的 AI 全文
+        const body =
+          extractMermaidSource(source) ||
+          prepareMermaidSource(source) ||
+          DEFAULT_MERMAID_TEMPLATE;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const codeBlock = codeBlockSchema.type(ctx);
+            const { state } = view;
+            const node = codeBlock.create(
+              { language: "mermaid" },
+              state.schema.text(body),
+            );
+            let tr = state.tr;
+            if (!state.selection.empty) {
+              tr = tr.deleteSelection();
+            }
+            const $ = tr.selection.$from;
+            // 空顶层段落：直接替换为 code_block
+            if (
+              $.depth === 1 &&
+              $.parent.type.name === "paragraph" &&
+              $.parent.content.size === 0 &&
+              $.parent.type !== codeBlock
+            ) {
+              tr = tr.replaceWith($.before(), $.after(), node);
+              view.dispatch(tr.scrollIntoView());
+              view.focus();
+              ok = true;
+              return;
+            }
+            // 向上找到允许插入 code_block 的父级（避开 list_item / table 等）
+            let insertPos: number | null = null;
+            for (let d = $.depth; d >= 1; d--) {
+              const parent = $.node(d);
+              const index = $.index(d);
+              if (parent.canReplaceWith(index + 1, index + 1, codeBlock)) {
+                insertPos = $.after(d);
+                break;
+              }
+              if (parent.canReplaceWith(index, index, codeBlock) && d === 1) {
+                // 当前顶层块可被替换（少见）
+                insertPos = $.before(d);
+                tr = tr.replaceWith($.before(d), $.after(d), node);
+                view.dispatch(tr.scrollIntoView());
+                view.focus();
+                ok = true;
+                return;
+              }
+            }
+            if (insertPos == null) {
+              // 文档末尾
+              const end = tr.doc.content.size;
+              if (tr.doc.canReplaceWith(tr.doc.childCount, tr.doc.childCount, codeBlock)) {
+                insertPos = end;
+              }
+            }
+            if (insertPos == null) return;
+            tr = tr.insert(insertPos, node);
+            tr = tr.setSelection(
+              TextSelection.near(tr.doc.resolve(insertPos + 1)),
+            );
+            view.dispatch(tr.scrollIntoView());
+            view.focus();
+            ok = true;
+          });
+          if (ok) return true;
+        } catch {
+          /* fall through */
+        }
+        // 回退：与菜单栏「Mermaid 图」相同，整篇 replaceAll 追加围栏（可稳定触发预览）
+        try {
+          const md = c.getMarkdown();
+          applyMarkdown(
+            c,
+            `${md.trimEnd()}\n\n\`\`\`mermaid\n${body}\n\`\`\`\n`,
+            false,
+          );
           return true;
         } catch {
           return false;

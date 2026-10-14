@@ -24,7 +24,7 @@ import {
   type PaperStyle,
   type SettingsView,
 } from "./api";
-import type { AiCapabilityId } from "./ai/capabilities";
+import type { AiCapabilityId, AiMode } from "./ai/capabilities";
 import { runAiCapability } from "./ai/runAi";
 import {
   DEFAULT_THEME,
@@ -53,6 +53,7 @@ import {
   type MenuAction,
 } from "./components/MenuBar";
 import { runFormatAction } from "./components/editorCommands";
+import { LlmSettingsModal } from "./components/LlmSettingsModal";
 import { SettingsModal } from "./components/SettingsModal";
 import {
   SourceEditor,
@@ -65,6 +66,7 @@ import { WorkspaceSearchModal } from "./components/WorkspaceSearchModal";
 import { runExport } from "./export/runExport";
 import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
+import { extractMermaidSource } from "./diagrams/normalizeMermaidMd";
 import { prepareCellInlineText } from "./markdown/tableCellSelection";
 import { countWords, footnoteHintCss, nextFootnoteRef, splitFrontMatter, upsertToc } from "./chrome/docUtils";
 import { importAssetPath, isImagePath, saveAssetFile } from "./assets/saveAsset";
@@ -132,6 +134,7 @@ export default function App() {
   const [treeKey, setTreeKey] = useState(0);
   const [status, setStatus] = useState("就绪");
   const [showSettings, setShowSettings] = useState(false);
+  const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [htmlEnabled, setHtmlEnabled] = useState(true);
   const [hasAiKey, setHasAiKey] = useState(false);
   const [aiKeyInvalid, setAiKeyInvalid] = useState(false);
@@ -154,8 +157,7 @@ export default function App() {
   const [findReplaceMode, setFindReplaceMode] = useState(false);
   const [wsSearchOpen, setWsSearchOpen] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
-  const [aiSelected, setAiSelected] =
-    useState<AiCapabilityId>("optimize_document");
+  const [aiMode, setAiMode] = useState<AiMode>("write");
   const [aiNote, setAiNote] = useState("");
   const [aiImages, setAiImages] = useState<string[]>([]);
   const [aiPanelStatus, setAiPanelStatus] = useState("");
@@ -178,7 +180,6 @@ export default function App() {
     setSupportsMultimodal(!!v.supportsMultimodal);
     if (!v.supportsMultimodal) {
       setAiImages([]);
-      setAiSelected((id) => (id === "image_to_md" ? "optimize_document" : id));
     }
     if (v.theme) setTheme(parseThemeId(v.theme));
     setRecent(v.recent ?? []);
@@ -337,8 +338,28 @@ export default function App() {
         to?: number;
         inTableCell?: boolean;
         tableSelectionBlocked?: boolean;
+        writeMode?: "replace_selection" | "replace_document" | "insert_at_cursor";
       },
     ): boolean => {
+      if (range?.writeMode === "insert_at_cursor") {
+        // 与 Diff 预览共用 extractMermaidSource，避免前言/围栏识别不一致
+        const mermaidSrc = !sourceMode ? extractMermaidSource(text) : null;
+        if (!sourceMode && range.from != null && range.to != null) {
+          editorRef.current?.restoreSelection(range.from, range.to);
+        } else if (!sourceMode) {
+          editorRef.current?.focus();
+        }
+        const ok = sourceMode
+          ? sourceRef.current?.insertAtCursor(text)
+          : mermaidSrc
+            ? editorRef.current?.insertMermaidSourceAtCursor(mermaidSrc)
+            : editorRef.current?.insertMarkdownAtCursor(text);
+        if (ok) {
+          markDirtyFrom(currentEditorMarkdown());
+          return true;
+        }
+        return false;
+      }
       if (replaceSelection) {
         if (range?.tableSelectionBlocked) {
           return false;
@@ -431,13 +452,17 @@ export default function App() {
   const runAi = useCallback(
     async (id: AiCapabilityId, note?: string) => {
       if (!hasAiKey || aiKeyInvalid) {
-        setStatus("请先在 设置 → AI 中配置 API Key");
-        setShowSettings(true);
+        setStatus("请先在 设置 → 大模型配置 中配置 API Key");
+        setShowLlmSettings(true);
         return;
       }
       setAiBusy(true);
       setAiPanelStatus("正在请求模型…");
-      setAiSelected(id);
+      const started = Date.now();
+      const tick = window.setInterval(() => {
+        const sec = Math.round((Date.now() - started) / 1000);
+        setAiPanelStatus(`正在请求模型…（${sec}s）`);
+      }, 1000);
       try {
         const md = currentEditorMarkdown();
         const selMeta = sourceMode
@@ -449,8 +474,10 @@ export default function App() {
           setAiPanelStatus(msg);
           return;
         }
-        const selection =
-          selMeta?.text ?? getEditorSelection();
+        // 空选区时 selMeta.text 为 ""（仍带光标坐标）；勿用 ?? 吃掉空串
+        const selection = selMeta?.text?.trim()
+          ? selMeta.text
+          : getEditorSelection();
         const result = await runAiCapability({
           id,
           markdown: md,
@@ -458,19 +485,25 @@ export default function App() {
           note: note ?? aiNote,
           images: aiImages,
           supportsMultimodal,
+          paperStyle,
+          paperLayout,
         });
         setAiDiff({
           label: result.label,
           before: result.before,
           after: result.text,
           replaceSelection: result.replaceSelection,
+          writeMode: result.writeMode,
           warn: result.warn,
           from: selMeta?.from,
           to: selMeta?.to,
           inTableCell: selMeta?.inTableCell,
           tableSelectionBlocked: selMeta?.tableSelectionBlocked,
+          // 识图：把用户附图带进 Diff，左侧展示上传图（勿渲染文档内图片）
+          inputImages:
+            id === "image_to_md" ? [...aiImages] : undefined,
         });
-        setAiImages([]);
+        if (id === "image_to_md") setAiImages([]);
         const msg = result.warn
           ? `待确认：${result.label}（${result.warn}）`
           : `待确认：${result.label} — 请对比后选择是否启用`;
@@ -481,12 +514,14 @@ export default function App() {
         if (/API Key|401|403|鉴权|权限/i.test(err)) {
           setAiKeyInvalid(true);
           setAiPanelStatus("Key 不可用，请重新配置");
-          setStatus("API Key 无效，请到设置中检查");
+          setStatus("API Key 无效，请到大模型配置中检查");
+          setShowLlmSettings(true);
         } else {
           setAiPanelStatus(`失败: ${err}`);
           setStatus(`AI 失败: ${err}`);
         }
       } finally {
+        window.clearInterval(tick);
         setAiBusy(false);
       }
     },
@@ -495,6 +530,8 @@ export default function App() {
       aiKeyInvalid,
       aiNote,
       currentEditorMarkdown,
+      paperLayout,
+      paperStyle,
       getEditorSelection,
       hasAiKey,
       sourceMode,
@@ -1348,6 +1385,9 @@ export default function App() {
         case "openSettings":
           setShowSettings(true);
           break;
+        case "openLlmSettings":
+          setShowLlmSettings(true);
+          break;
         case "about":
           window.alert(
             "Lumen MD Live 0.1\n真所见即所得 Markdown 编辑器\n支持 Windows / macOS / Linux\nCtrl/⌘+/ 源码 · Ctrl/⌘+W 关闭标签",
@@ -1512,15 +1552,15 @@ export default function App() {
                 hasKey={hasAiKey}
                 keyInvalid={aiKeyInvalid}
                 busy={aiBusy}
-                selectedId={aiSelected}
+                mode={aiMode}
                 note={aiNote}
                 supportsMultimodal={supportsMultimodal}
                 images={aiImages}
-                onSelect={setAiSelected}
+                onModeChange={setAiMode}
                 onNoteChange={setAiNote}
                 onImagesChange={setAiImages}
-                onRun={() => void runAi(aiSelected)}
-                onOpenSettings={() => setShowSettings(true)}
+                onRun={(id, note) => void runAi(id, note)}
+                onOpenSettings={() => setShowLlmSettings(true)}
                 statusText={aiPanelStatus}
               />
             ) : null}
@@ -1582,6 +1622,11 @@ export default function App() {
           setPaperMarginLeft(m.left);
         }}
       />
+      <LlmSettingsModal
+        open={showLlmSettings}
+        onClose={() => setShowLlmSettings(false)}
+        onChanged={applySettingsView}
+      />
       <AiDiffModal
         preview={aiDiff}
         onAccept={() => {
@@ -1595,6 +1640,7 @@ export default function App() {
               to: aiDiff.to,
               inTableCell: aiDiff.inTableCell,
               tableSelectionBlocked: aiDiff.tableSelectionBlocked,
+              writeMode: aiDiff.writeMode,
             },
           );
           if (!ok) {
@@ -1637,7 +1683,10 @@ export default function App() {
         onRun={(id) => void runAi(id, "")}
         onOpenAiPanel={() => {
           setShowAiPanel(true);
-          window.setTimeout(() => aiPanelRef.current?.focusNote(), 50);
+          setAiMode(ctxMenu.hasSelection ? "write" : "subject");
+          window.setTimeout(() => {
+            if (!ctxMenu.hasSelection) aiPanelRef.current?.focusNote();
+          }, 50);
         }}
         onEdit={(action) => {
           if (!sourceMode) {
@@ -1660,7 +1709,7 @@ export default function App() {
             /* ignore */
           }
         }}
-        onOpenSettings={() => setShowSettings(true)}
+        onOpenSettings={() => setShowLlmSettings(true)}
         onClose={() => setCtxMenu((m) => ({ ...m, open: false }))}
       />
     </div>

@@ -35,6 +35,7 @@ export type SourceEditorHandle = {
   focus: () => void;
   getSelection: () => string | null;
   replaceSelection: (text: string) => boolean;
+  insertAtCursor: (text: string) => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -102,6 +103,17 @@ export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
         view.dispatch({
           changes: { from, to, insert: text },
           selection: { anchor: from + text.length },
+        });
+        return true;
+      },
+      insertAtCursor: (text: string) => {
+        const view = viewRef.current;
+        if (!view) return false;
+        const { from, to } = view.state.selection.main;
+        const insert = text.trim() ? `\n\n${text.trim()}\n\n` : text;
+        view.dispatch({
+          changes: { from, to, insert },
+          selection: { anchor: from + insert.length },
         });
         return true;
       },
