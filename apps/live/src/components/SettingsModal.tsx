@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   llmTest,
   settingsClearKey,
@@ -6,6 +6,24 @@ import {
   settingsSet,
   type SettingsView,
 } from "../api";
+
+const PAPER_MARGIN_PRESETS = [
+  { id: "narrow", label: "窄", top: 12, right: 12, bottom: 12, left: 12 },
+  { id: "medium", label: "中", top: 18, right: 22, bottom: 24, left: 22 },
+  { id: "wide", label: "宽", top: 25, right: 28, bottom: 28, left: 25 },
+] as const;
+
+type PaperMargins = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+};
+
+function clampMarginMm(n: number): number {
+  if (!Number.isFinite(n)) return 18;
+  return Math.min(40, Math.max(5, Math.round(n)));
+}
 
 const PLATFORMS: {
   id: string;
@@ -111,9 +129,16 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onChanged?: (view: SettingsView) => void;
+  /** 边距即时预览（不必等保存） */
+  onPaperMarginsChange?: (m: PaperMargins) => void;
 };
 
-export function SettingsModal({ open, onClose, onChanged }: Props) {
+export function SettingsModal({
+  open,
+  onClose,
+  onChanged,
+  onPaperMarginsChange,
+}: Props) {
   const [view, setView] = useState<SettingsView | null>(null);
   const [htmlEnabled, setHtmlEnabled] = useState(true);
   const [platform, setPlatform] = useState("deepseek");
@@ -126,10 +151,62 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
   const [assetsDir, setAssetsDir] = useState("assets");
   const [userCss, setUserCss] = useState("");
   const [restoreLastFolder, setRestoreLastFolder] = useState(false);
+  const [paperMarginTop, setPaperMarginTop] = useState(18);
+  const [paperMarginRight, setPaperMarginRight] = useState(22);
+  const [paperMarginBottom, setPaperMarginBottom] = useState(24);
+  const [paperMarginLeft, setPaperMarginLeft] = useState(22);
+  const viewRef = useRef<SettingsView | null>(null);
+  const marginPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const onChangedRef = useRef(onChanged);
+  const onPaperMarginsChangeRef = useRef(onPaperMarginsChange);
+  onChangedRef.current = onChanged;
+  onPaperMarginsChangeRef.current = onPaperMarginsChange;
+  viewRef.current = view;
 
   const platformMeta =
     PLATFORMS.find((x) => x.id === platform) ?? PLATFORMS[0];
   const isOllama = platform === "ollama";
+
+  /** 边距变更：立刻推到预览，并防抖写入 prefs */
+  const applyPaperMargins = (next: PaperMargins, persistDelayMs = 200) => {
+    const top = clampMarginMm(next.top);
+    const right = clampMarginMm(next.right);
+    const bottom = clampMarginMm(next.bottom);
+    const left = clampMarginMm(next.left);
+    setPaperMarginTop(top);
+    setPaperMarginRight(right);
+    setPaperMarginBottom(bottom);
+    setPaperMarginLeft(left);
+    onPaperMarginsChangeRef.current?.({ top, right, bottom, left });
+    const base = viewRef.current;
+    if (base) {
+      setView({
+        ...base,
+        paperMarginTop: top,
+        paperMarginRight: right,
+        paperMarginBottom: bottom,
+        paperMarginLeft: left,
+      });
+    }
+    if (marginPersistTimer.current) {
+      clearTimeout(marginPersistTimer.current);
+    }
+    marginPersistTimer.current = setTimeout(() => {
+      void settingsSet({
+        paperMarginTop: top,
+        paperMarginRight: right,
+        paperMarginBottom: bottom,
+        paperMarginLeft: left,
+      })
+        .then((v) => {
+          setView(v);
+          onChangedRef.current?.(v);
+        })
+        .catch(() => {});
+    }, persistDelayMs);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -146,10 +223,41 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
         setAssetsDir(v.assetsDir || "assets");
         setUserCss(v.userCss || "");
         setRestoreLastFolder(!!v.restoreLastFolder);
+        setPaperMarginTop(clampMarginMm(v.paperMarginTop ?? 18));
+        setPaperMarginRight(clampMarginMm(v.paperMarginRight ?? 22));
+        setPaperMarginBottom(clampMarginMm(v.paperMarginBottom ?? 24));
+        setPaperMarginLeft(clampMarginMm(v.paperMarginLeft ?? 22));
         onChanged?.(v);
       })
       .catch((e) => setMsg(`读取设置失败: ${e}`));
   }, [open, onChanged]);
+
+  useEffect(() => {
+    return () => {
+      if (marginPersistTimer.current) {
+        clearTimeout(marginPersistTimer.current);
+      }
+    };
+  }, []);
+
+  // 关闭设置时立刻落盘未写入的边距，避免防抖被打断
+  useEffect(() => {
+    if (open) return;
+    if (!marginPersistTimer.current) return;
+    clearTimeout(marginPersistTimer.current);
+    marginPersistTimer.current = null;
+    void settingsSet({
+      paperMarginTop: clampMarginMm(paperMarginTop),
+      paperMarginRight: clampMarginMm(paperMarginRight),
+      paperMarginBottom: clampMarginMm(paperMarginBottom),
+      paperMarginLeft: clampMarginMm(paperMarginLeft),
+    })
+      .then((v) => {
+        setView(v);
+        onChangedRef.current?.(v);
+      })
+      .catch(() => {});
+  }, [open, paperMarginTop, paperMarginRight, paperMarginBottom, paperMarginLeft]);
 
   if (!open) return null;
 
@@ -167,9 +275,17 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
         assetsDir: assetsDir.trim() || "assets",
         userCss,
         restoreLastFolder,
+        paperMarginTop: clampMarginMm(paperMarginTop),
+        paperMarginRight: clampMarginMm(paperMarginRight),
+        paperMarginBottom: clampMarginMm(paperMarginBottom),
+        paperMarginLeft: clampMarginMm(paperMarginLeft),
       });
       setView(v);
       setBaseUrl(v.baseUrl);
+      setPaperMarginTop(clampMarginMm(v.paperMarginTop));
+      setPaperMarginRight(clampMarginMm(v.paperMarginRight));
+      setPaperMarginBottom(clampMarginMm(v.paperMarginBottom));
+      setPaperMarginLeft(clampMarginMm(v.paperMarginLeft));
       if (apiKey.trim()) setApiKey("");
       onChanged?.(v);
       if (isOllama) {
@@ -294,6 +410,74 @@ export function SettingsModal({ open, onClose, onChanged }: Props) {
               spellCheck={false}
             />
           </label>
+        </section>
+
+        <section className="settings-section">
+          <h3>A4 页边距</h3>
+          <p className="settings-hint">
+            单位毫米（5–40）。预览与 PDF/HTML 导出共用；可先选预设再微调。
+          </p>
+          <div className="settings-margin-presets" role="group" aria-label="边距预设">
+            {PAPER_MARGIN_PRESETS.map((p) => {
+              const active =
+                paperMarginTop === p.top &&
+                paperMarginRight === p.right &&
+                paperMarginBottom === p.bottom &&
+                paperMarginLeft === p.left;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={
+                    "settings-preset-btn" + (active ? " is-active" : "")
+                  }
+                  onClick={() => {
+                    applyPaperMargins(
+                      {
+                        top: p.top,
+                        right: p.right,
+                        bottom: p.bottom,
+                        left: p.left,
+                      },
+                      0,
+                    );
+                  }}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="settings-margin-grid">
+            {(
+              [
+                ["上", "top", paperMarginTop],
+                ["右", "right", paperMarginRight],
+                ["下", "bottom", paperMarginBottom],
+                ["左", "left", paperMarginLeft],
+              ] as const
+            ).map(([label, key, value]) => (
+              <label className="settings-field settings-margin-field" key={label}>
+                <span>{label}（mm）</span>
+                <input
+                  type="number"
+                  min={5}
+                  max={40}
+                  step={1}
+                  value={value}
+                  onChange={(e) => {
+                    const n = clampMarginMm(Number(e.target.value));
+                    applyPaperMargins({
+                      top: key === "top" ? n : paperMarginTop,
+                      right: key === "right" ? n : paperMarginRight,
+                      bottom: key === "bottom" ? n : paperMarginBottom,
+                      left: key === "left" ? n : paperMarginLeft,
+                    });
+                  }}
+                />
+              </label>
+            ))}
+          </div>
         </section>
 
         <section className="settings-section">

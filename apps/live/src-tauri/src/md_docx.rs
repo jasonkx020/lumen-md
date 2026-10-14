@@ -311,7 +311,7 @@ pub fn markdown_to_github_html_with_ctx(
     format_html(root, &gfm_options_allow_sanitized_html(), &mut body)
         .map_err(|e| anyhow::anyhow!("HTML 渲染失败: {e}"))?;
     body = embed_images_in_html(&body, ctx);
-    Ok(format!(
+    let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -487,7 +487,8 @@ body {{
 }}
 @media print {{
   .markdown-body {{ padding: 0; max-width: none; }}
-  @page {{ margin: 1.5cm; }}
+  /* 页边由 .export-paper padding 承担（与预览同一公式）；此处仅占位 */
+  @page {{ size: A4; margin: 0; }}
   a {{ color: var(--accent); }}
 }}
 .footnote-ref {{ font-size: 0.75em; vertical-align: super; }}
@@ -584,7 +585,245 @@ body {{
         link = COLOR_LINK,
         inline_bg = COLOR_INLINE_CODE_BG,
         canary = PDF_HTML_CANARY,
-    ))
+    );
+    Ok(apply_export_paper_layout(html))
+}
+
+fn html_escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// 按 prefs 为导出 HTML 套用文稿样式。
+/// 印刷边距以 `@page margin: mt mr mb ml` 为准（Chrome print-to-pdf 可靠）；
+/// 屏幕打开 HTML 时用 `.export-paper` padding 模拟同一数值；print 清零内容 padding。
+fn apply_export_paper_layout(mut html: String) -> String {
+    let prefs = crate::settings_store::load_prefs();
+    let layout = prefs.paper_layout.trim().to_ascii_lowercase();
+    let style = prefs.paper_style.trim().to_ascii_lowercase();
+    let is_a4 = layout == "a4";
+    let style_key = match style.as_str() {
+        "homework" => "homework",
+        "exam" => "exam",
+        _ => "document",
+    };
+
+    let mt = prefs.paper_margin_top.clamp(5, 40);
+    let mr = prefs.paper_margin_right.clamp(5, 40);
+    let mb = prefs.paper_margin_bottom.clamp(5, 40);
+    let ml = prefs.paper_margin_left.clamp(5, 40);
+
+    // 印刷页边一律 @page margin:0 + 纸面 padding（与预览同一盒子模型）。
+    // Chrome --print-to-pdf 对 @page margin 的解释常比预览「更窄」，导致每行少字。
+    for old in [
+        "@page { size: A4; margin: 18mm 22mm 24mm 22mm; }",
+        "@page { size: A4; margin: 1.5cm; }",
+    ] {
+        if html.contains(old) {
+            html = html.replace(old, "@page { size: A4; margin: 0; }");
+            break;
+        }
+    }
+
+    // 与 App.css --paper-font-sans / --paper-font-serif 保持一致；字号用 pt（16px=12pt）锁定打印度量
+    const PAPER_FONT_SANS: &str = r#""Microsoft YaHei", "PingFang SC", "Noto Sans SC", "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif"#;
+    const PAPER_FONT_SERIF: &str = r#""Songti SC", "SimSun", "Noto Serif SC", "Times New Roman", serif"#;
+
+    let style_css = match style_key {
+        "homework" => format!(
+            r#"
+body.paper-style-homework,
+body.paper-style-homework .markdown-body {{
+  font-family: {PAPER_FONT_SANS};
+  font-size: 13.5pt;
+  line-height: 2;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}}
+body.paper-style-homework .markdown-body {{
+  background-image: repeating-linear-gradient(
+    transparent 0,
+    transparent calc(2em - 1px),
+    rgba(70, 110, 180, 0.14) calc(2em - 1px),
+    rgba(70, 110, 180, 0.14) 2em
+  );
+}}
+"#
+        ),
+        "exam" => format!(
+            r#"
+body.paper-style-exam,
+body.paper-style-exam .markdown-body {{
+  font-family: {PAPER_FONT_SERIF};
+  font-size: 11.25pt;
+  line-height: 1.55;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}}
+body.paper-style-exam .markdown-body h1 {{
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}}
+body.paper-style-exam .markdown-body h2 {{ font-weight: 700; }}
+.export-exam-chrome {{ margin: 0 0 8px; font-family: {PAPER_FONT_SERIF}; color: #111; }}
+.export-exam-school {{ text-align: center; font-size: 11.25pt; margin: 0 0 4px; }}
+.export-exam-title {{ text-align: center; font-size: 15pt; font-weight: 700; letter-spacing: 0.08em; margin: 0 0 10px; }}
+.export-exam-info {{ display: flex; flex-wrap: wrap; gap: 18px 28px; justify-content: center; font-size: 10.5pt; border-bottom: 1px solid #222; padding-bottom: 8px; }}
+.export-exam-blank {{ display: inline-block; width: 72px; border-bottom: 1px solid #222; height: 1em; vertical-align: baseline; margin-left: 4px; }}
+.export-exam-blank-wide {{ width: 96px; }}
+.export-exam-seal {{
+  position: absolute; left: 0; top: 0; bottom: 0; width: 28mm;
+  border-right: 1.5px dashed #333; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+}}
+.export-exam-seal span {{
+  writing-mode: vertical-rl; text-orientation: mixed;
+  font-size: 9pt; letter-spacing: 0.35em; color: #333;
+}}
+"#
+        ),
+        _ => format!(
+            r#"
+body.paper-style-document,
+body.paper-style-document .markdown-body {{
+  font-family: {PAPER_FONT_SANS};
+  font-size: 12pt;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}}
+"#
+        ),
+    };
+
+    // 预览与 PDF 同一盒子：宽 210mm + padding=页边；print 绝不清零 padding
+    // 密封：正文再留 28mm（不叠进 prefs 左边距）
+    let paper_css = format!(
+        r#"
+.export-paper {{
+  position: relative;
+  box-sizing: border-box;
+  width: 210mm;
+  max-width: 210mm;
+  min-height: 297mm;
+  margin: 0 auto;
+  padding: {mt}mm {mr}mm {mb}mm {ml}mm;
+  background: #fff;
+}}
+.export-paper.has-seal .export-exam-chrome,
+.export-paper.has-seal > .markdown-body {{
+  padding-left: 28mm;
+}}
+.export-paper > .markdown-body {{
+  max-width: none !important;
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  box-sizing: border-box !important;
+}}
+.export-paper.has-seal > .markdown-body {{
+  padding-left: 28mm !important;
+}}
+body.paper-layout-a4 {{ background: #c5cad1; }}
+body.paper-layout-a4 .export-paper {{
+  margin: 16px auto;
+  box-shadow: 0 2px 14px rgba(0,0,0,.18);
+}}
+@media print {{
+  @page {{ size: A4; margin: 0; }}
+  html, body, body.paper-layout-a4 {{
+    background: #fff !important;
+    width: 210mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }}
+  .export-paper,
+  .export-paper.has-seal {{
+    width: 210mm !important;
+    max-width: 210mm !important;
+    min-height: 297mm !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    /* 关键：print 保留 padding，与预览纸面 padding 一致 */
+    padding: {mt}mm {mr}mm {mb}mm {ml}mm !important;
+    box-sizing: border-box !important;
+  }}
+  .export-paper > .markdown-body {{
+    padding: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+  }}
+  .export-paper.has-seal .export-exam-chrome,
+  .export-paper.has-seal > .markdown-body {{
+    padding-left: 28mm !important;
+  }}
+}}
+"#
+    );
+
+    let inject_css = format!("{style_css}{paper_css}");
+    if let Some(idx) = html.find("</style>") {
+        html.insert_str(idx, &inject_css);
+    }
+
+    let body_class = format!("paper-layout-{layout} paper-style-{style_key}");
+    html = html.replacen("<body>", &format!("<body class=\"{body_class}\">"), 1);
+
+    let show_exam_chrome = is_a4 && style_key == "exam";
+    let use_seal = show_exam_chrome && prefs.exam_seal_enabled;
+
+    let mut open = String::from(r#"<div class="export-paper"#);
+    if use_seal {
+        open.push_str(" has-seal");
+    }
+    open.push_str("\">");
+    if use_seal {
+        open.push_str(
+            r#"<div class="export-exam-seal" aria-hidden="true"><span>密封线内不得答题</span></div>"#,
+        );
+    }
+    if show_exam_chrome && prefs.exam_header_enabled {
+        let school = html_escape_text(&prefs.exam_school);
+        let title = html_escape_text(&prefs.exam_title);
+        open.push_str(&format!(
+            r#"<div class="export-exam-chrome">
+<div class="export-exam-school">{school}</div>
+<div class="export-exam-title">{title}</div>
+<div class="export-exam-info">
+<span>姓名<span class="export-exam-blank"></span></span>
+<span>班级<span class="export-exam-blank"></span></span>
+<span>考号<span class="export-exam-blank export-exam-blank-wide"></span></span>
+</div>
+</div>"#
+        ));
+    }
+
+    if let Some(pos) = html.find(r#"<article class="markdown-body">"#) {
+        html.insert_str(pos, &open);
+        if let Some(end) = html.rfind("</article>") {
+            let after = end + "</article>".len();
+            html.insert_str(after, "</div>");
+        }
+    }
+
+    html
 }
 
 /// 兼容旧名（测试 / 外部仍可调用）。
@@ -1859,6 +2098,47 @@ fn main() {}
                 .collect::<String>()
         );
         assert!(html.contains("docs/v1/a.jpg") || html.contains("data:image"), "img lost");
+    }
+
+    #[test]
+    fn github_html_page_is_a4() {
+        let html = markdown_to_github_html("# 标题\n\n正文\n").unwrap();
+        assert!(
+            html.contains("size: A4"),
+            "export HTML should declare A4 @page"
+        );
+        assert!(
+            html.contains("@page { size: A4; margin: 0; }")
+                || html.contains("@page { size: A4; margin: 0}"),
+            "print @page margin must be 0; paper padding carries edge inset"
+        );
+        assert!(
+            html.contains("export-paper"),
+            "export should wrap content with .export-paper"
+        );
+        // print 保留纸面 padding（与预览同一盒子），不能清零
+        assert!(
+            html.contains("width: 210mm") && html.contains("12pt")
+                || html.contains("13.5pt")
+                || html.contains("11.25pt")
+                || html.contains("Microsoft YaHei"),
+            "export should lock A4 width and print font metrics"
+        );
+        assert!(
+            html.contains("@media print")
+                && html.contains("padding:")
+                && html.contains("210mm"),
+            "print rules should keep 210mm paper with padding"
+        );
+        assert!(
+            html.contains("paper-layout-") && html.contains("paper-style-"),
+            "export body should carry paper layout/style classes"
+        );
+        // 印刷字体与预览对齐（非 JetBrains Mono）
+        assert!(
+            html.contains("Microsoft YaHei") || html.contains("Songti SC"),
+            "export should use print font stack matching A4 preview"
+        );
     }
 
     #[test]

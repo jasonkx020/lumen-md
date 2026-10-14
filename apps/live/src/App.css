@@ -18,6 +18,11 @@
   --font-ui: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-editor: "JetBrains Mono", "Cascadia Code", Consolas, "Sarasa Mono SC",
     monospace;
+  /* A4 预览 / PDF 共用印刷字体（勿用等宽编辑字体，否则换行与导出不一致） */
+  --paper-font-sans: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", "Segoe UI",
+    -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif;
+  --paper-font-serif: "Songti SC", "SimSun", "Noto Serif SC", "Times New Roman",
+    serif;
   --menu-h: 36px;
   --status-h: 24px;
 }
@@ -399,6 +404,229 @@ body,
 
 .editor-layer.is-hidden {
   display: none;
+}
+
+.editor-layer.is-paper-a4 {
+  background: #c5cad1;
+  padding: 16px 12px 32px;
+}
+
+.paper-sheet {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100%;
+  position: relative;
+}
+
+.paper-sheet.is-paper-a4 {
+  /* 固定物理 A4 宽，避免窗口缩窄时 mm 边距相对内容比例失真（与 PDF 不一致） */
+  width: 210mm;
+  margin: 0 auto;
+  background: #fff;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.18);
+  min-height: 297mm;
+  box-sizing: border-box;
+  /* 纸面 padding = 页边距（与 PDF @page margin 同数值） */
+  padding: var(--paper-mt, 18mm) var(--paper-mr, 22mm) var(--paper-mb, 24mm)
+    var(--paper-ml, 22mm);
+  /* 浅虚线提示页高 */
+  background-image: repeating-linear-gradient(
+    to bottom,
+    #fff 0,
+    #fff calc(297mm - 1px),
+    rgba(0, 0, 0, 0.12) calc(297mm - 1px),
+    rgba(0, 0, 0, 0.12) 297mm
+  );
+}
+
+.paper-sheet.is-paper-a4 .crepe-host {
+  /* 边距只在 .paper-sheet；清零 Crepe 默认水平 padding，避免预览比 PDF「更空」 */
+  padding: 0 0 32px;
+  min-height: 0;
+  background: transparent;
+  font-family: var(--paper-font-sans);
+}
+
+.paper-sheet.is-paper-a4 .crepe-host,
+.paper-sheet.is-paper-a4 .crepe-host .ProseMirror {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* 密封槽只加在正文/页眉，不叠加进纸面左边距（与 PDF：@page ml + 正文 28mm 一致） */
+.paper-sheet.is-paper-a4.has-exam-seal .crepe-host {
+  padding-left: 28mm;
+}
+
+.paper-sheet.is-paper-a4.has-exam-seal .exam-paper-chrome.has-header {
+  padding-left: 28mm;
+}
+
+.paper-sheet.is-paper-a4 .crepe-host .ProseMirror {
+  /* 纸面为白底印刷预览，避免主题 editor-bg 干扰与 PDF 对比 */
+  background: transparent;
+}
+
+.paper-sheet.is-style-document .crepe-host .ProseMirror {
+  font-family: var(--paper-font-sans);
+  /* 与导出一致：12pt=16px@96dpi，避免 px/print 度量差导致换行不一致 */
+  font-size: 12pt;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.paper-sheet.is-style-homework .crepe-host .ProseMirror {
+  font-family: var(--paper-font-sans);
+  font-size: 13.5pt;
+  line-height: 2;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  background-image: repeating-linear-gradient(
+    transparent 0,
+    transparent calc(2em - 1px),
+    rgba(70, 110, 180, 0.14) calc(2em - 1px),
+    rgba(70, 110, 180, 0.14) 2em
+  );
+  background-attachment: local;
+}
+
+.paper-sheet.is-style-exam .crepe-host,
+.paper-sheet.is-style-exam .crepe-host .ProseMirror {
+  font-family: var(--paper-font-serif);
+}
+
+.paper-sheet.is-style-exam .crepe-host .ProseMirror {
+  font-size: 11.25pt;
+  line-height: 1.55;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.paper-sheet.is-style-exam .crepe-host .ProseMirror h1 {
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.paper-sheet.is-style-exam .crepe-host .ProseMirror h2 {
+  font-weight: 700;
+}
+
+.exam-paper-chrome {
+  position: static;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.exam-paper-chrome.has-header {
+  /* 页边距已在 .paper-sheet；密封时再由 has-exam-seal 规则加 28mm */
+  padding: 0 0 8px;
+}
+
+.exam-paper-chrome input {
+  pointer-events: auto;
+}
+
+.exam-header {
+  border-bottom: 1px solid #222;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  font-family: "Songti SC", "SimSun", "Noto Serif SC", serif;
+  color: #111;
+}
+
+.exam-school,
+.exam-exam-title {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: center;
+  font: inherit;
+  color: inherit;
+  outline: none;
+}
+
+.exam-school {
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.exam-exam-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+}
+
+.exam-info-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px 28px;
+  font-size: 14px;
+  justify-content: center;
+}
+
+.exam-info-row > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.exam-blank {
+  display: inline-block;
+  width: 72px;
+  border-bottom: 1px solid #222;
+  height: 1em;
+  vertical-align: baseline;
+}
+
+.exam-blank-wide {
+  width: 96px;
+}
+
+.exam-seal {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 28mm;
+  border-right: 1.5px dashed #333;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent 5px,
+    rgba(0, 0, 0, 0.04) 5px,
+    rgba(0, 0, 0, 0.04) 6px
+  );
+}
+
+.exam-seal-text {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 12px;
+  letter-spacing: 0.35em;
+  color: #333;
+  font-family: "Songti SC", "SimSun", serif;
+  user-select: none;
+}
+
+.menu-item.is-disabled,
+.menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+  color: var(--muted);
 }
 
 .menu-actions {
@@ -1135,6 +1363,48 @@ button.primary:disabled {
   color: var(--muted);
   margin: 0;
   word-break: break-all;
+}
+
+.settings-margin-presets {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+
+.settings-preset-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.settings-preset-btn:hover {
+  background: var(--accent-soft);
+}
+
+.settings-preset-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.settings-margin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+
+.settings-margin-field {
+  margin-bottom: 0;
+}
+
+.settings-margin-field input[type="number"] {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .settings-actions {

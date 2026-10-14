@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { PaperLayout, PaperStyle } from "../api";
 import {
   extractOutline,
   type OutlineHeading,
@@ -51,6 +52,13 @@ export type MenuAction =
   | "toggleAiPanel"
   | "toggleFocus"
   | "toggleTypewriter"
+  | "paperLayoutFluid"
+  | "paperLayoutA4"
+  | "paperStyleDocument"
+  | "paperStyleHomework"
+  | "paperStyleExam"
+  | "toggleExamHeader"
+  | "toggleExamSeal"
   | `theme:${ThemeId}`
   | "openSettings"
   | "about"
@@ -141,6 +149,16 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "AI 助手", action: "toggleAiPanel" },
       { type: "item", label: "专注模式", action: "toggleFocus" },
       { type: "item", label: "打字机模式", action: "toggleTypewriter" },
+      { type: "sep" },
+      { type: "item", label: "流式全宽", action: "paperLayoutFluid" },
+      { type: "item", label: "A4 预览", action: "paperLayoutA4" },
+      { type: "sep" },
+      { type: "item", label: "普通文稿", action: "paperStyleDocument" },
+      { type: "item", label: "作业纸", action: "paperStyleHomework" },
+      { type: "item", label: "标准试卷", action: "paperStyleExam" },
+      { type: "sep" },
+      { type: "item", label: "显示试卷页眉", action: "toggleExamHeader" },
+      { type: "item", label: "显示密封线", action: "toggleExamSeal" },
     ],
   },
   {
@@ -172,7 +190,43 @@ type Props = {
   title: string;
   sourceMode: boolean;
   recent?: { path: string; kind: string }[];
+  paperLayout?: PaperLayout;
+  paperStyle?: PaperStyle;
+  examHeaderEnabled?: boolean;
+  examSealEnabled?: boolean;
 };
+
+function menuItemChecked(
+  action: MenuAction,
+  opts: {
+    sourceMode: boolean;
+    paperLayout: PaperLayout;
+    paperStyle: PaperStyle;
+    examHeaderEnabled: boolean;
+    examSealEnabled: boolean;
+  },
+): boolean {
+  switch (action) {
+    case "toggleSource":
+      return opts.sourceMode;
+    case "paperLayoutFluid":
+      return opts.paperLayout === "fluid";
+    case "paperLayoutA4":
+      return opts.paperLayout === "a4";
+    case "paperStyleDocument":
+      return opts.paperStyle === "document";
+    case "paperStyleHomework":
+      return opts.paperStyle === "homework";
+    case "paperStyleExam":
+      return opts.paperStyle === "exam";
+    case "toggleExamHeader":
+      return opts.examHeaderEnabled;
+    case "toggleExamSeal":
+      return opts.examSealEnabled;
+    default:
+      return false;
+  }
+}
 
 export function MenuBar({
   onAction,
@@ -180,6 +234,10 @@ export function MenuBar({
   title,
   sourceMode,
   recent = [],
+  paperLayout = "fluid",
+  paperStyle = "document",
+  examHeaderEnabled = true,
+  examSealEnabled = true,
 }: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
   const menusRef = useRef<HTMLElement>(null);
@@ -249,31 +307,44 @@ export function MenuBar({
               </button>
               {open ? (
                 <div className="menu-dropdown" role="menu">
-                  {items.map((it, i) =>
-                    it.type === "sep" ? (
-                      <div className="menu-sep" key={`s-${i}`} />
-                    ) : (
+                  {items.map((it, i) => {
+                    if (it.type === "sep") {
+                      return <div className="menu-sep" key={`s-${i}`} />;
+                    }
+                    const examOnly =
+                      it.action === "toggleExamHeader" ||
+                      it.action === "toggleExamSeal";
+                    const disabled = examOnly && paperStyle !== "exam";
+                    const checked = menuItemChecked(it.action, {
+                      sourceMode,
+                      paperLayout,
+                      paperStyle,
+                      examHeaderEnabled,
+                      examSealEnabled,
+                    });
+                    return (
                       <button
                         type="button"
                         className={
                           "menu-item" +
-                          (it.action === "toggleSource" && sourceMode
-                            ? " is-checked"
-                            : "")
+                          (checked ? " is-checked" : "") +
+                          (disabled ? " is-disabled" : "")
                         }
                         key={String(it.action) + it.label}
                         role="menuitem"
+                        disabled={disabled}
                         title={
                           String(it.action).startsWith("recent:")
                             ? String(it.action).slice(7)
                             : undefined
                         }
-                        onClick={() => runItem(it.action)}
+                        onClick={() => {
+                          if (disabled) return;
+                          runItem(it.action);
+                        }}
                       >
                         <span>
-                          {it.action === "toggleSource" && sourceMode
-                            ? "✓ "
-                            : ""}
+                          {checked ? "✓ " : ""}
                           {it.label}
                         </span>
                         {it.shortcut ? (
@@ -282,8 +353,8 @@ export function MenuBar({
                           </span>
                         ) : null}
                       </button>
-                    ),
-                  )}
+                    );
+                  })}
                 </div>
               ) : null}
             </div>

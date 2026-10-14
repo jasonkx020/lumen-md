@@ -79,6 +79,9 @@ export async function resolveDocLinkApi(args: {
   });
 }
 
+export type PaperLayout = "fluid" | "a4";
+export type PaperStyle = "document" | "homework" | "exam";
+
 export type SettingsView = {
   htmlEnabled: boolean;
   platform: string;
@@ -97,6 +100,16 @@ export type SettingsView = {
   userCss: string;
   restoreLastFolder: boolean;
   lastFolder: string | null;
+  paperLayout: PaperLayout;
+  paperStyle: PaperStyle;
+  examHeaderEnabled: boolean;
+  examSealEnabled: boolean;
+  examSchool: string;
+  examTitle: string;
+  paperMarginTop: number;
+  paperMarginRight: number;
+  paperMarginBottom: number;
+  paperMarginLeft: number;
 };
 
 export async function settingsGet(): Promise<SettingsView> {
@@ -116,6 +129,16 @@ export async function settingsSet(args: {
   assetsDir?: string;
   userCss?: string | null;
   restoreLastFolder?: boolean;
+  paperLayout?: PaperLayout;
+  paperStyle?: PaperStyle;
+  examHeaderEnabled?: boolean;
+  examSealEnabled?: boolean;
+  examSchool?: string;
+  examTitle?: string;
+  paperMarginTop?: number;
+  paperMarginRight?: number;
+  paperMarginBottom?: number;
+  paperMarginLeft?: number;
 }): Promise<SettingsView> {
   return invoke("settings_set", {
     req: {
@@ -131,6 +154,16 @@ export async function settingsSet(args: {
       assetsDir: args.assetsDir ?? null,
       userCss: args.userCss ?? null,
       restoreLastFolder: args.restoreLastFolder ?? null,
+      paperLayout: args.paperLayout ?? null,
+      paperStyle: args.paperStyle ?? null,
+      examHeaderEnabled: args.examHeaderEnabled ?? null,
+      examSealEnabled: args.examSealEnabled ?? null,
+      examSchool: args.examSchool ?? null,
+      examTitle: args.examTitle ?? null,
+      paperMarginTop: args.paperMarginTop ?? null,
+      paperMarginRight: args.paperMarginRight ?? null,
+      paperMarginBottom: args.paperMarginBottom ?? null,
+      paperMarginLeft: args.paperMarginLeft ?? null,
     },
   });
 }

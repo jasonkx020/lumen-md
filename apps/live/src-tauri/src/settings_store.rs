@@ -142,6 +142,61 @@ fn default_asset_mode() -> String {
     "workspace".into()
 }
 
+fn default_paper_layout() -> String {
+    "fluid".into()
+}
+
+fn default_paper_style() -> String {
+    "document".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_exam_school() -> String {
+    "（学校名称）".into()
+}
+
+fn default_exam_title() -> String {
+    "（考试名称）".into()
+}
+
+fn default_paper_margin_top() -> u32 {
+    18
+}
+
+fn default_paper_margin_right() -> u32 {
+    22
+}
+
+fn default_paper_margin_bottom() -> u32 {
+    24
+}
+
+fn default_paper_margin_left() -> u32 {
+    22
+}
+
+fn clamp_paper_margin_mm(v: u32) -> u32 {
+    v.clamp(5, 40)
+}
+
+fn normalize_paper_layout(s: &str) -> String {
+    match s.trim().to_lowercase().as_str() {
+        "a4" => "a4".into(),
+        _ => "fluid".into(),
+    }
+}
+
+fn normalize_paper_style(s: &str) -> String {
+    match s.trim().to_lowercase().as_str() {
+        "homework" => "homework".into(),
+        "exam" => "exam".into(),
+        _ => "document".into(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Prefs {
@@ -170,6 +225,29 @@ pub struct Prefs {
     pub restore_last_folder: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_folder: Option<String>,
+    /// fluid | a4
+    #[serde(default = "default_paper_layout")]
+    pub paper_layout: String,
+    /// document | homework | exam
+    #[serde(default = "default_paper_style")]
+    pub paper_style: String,
+    #[serde(default = "default_true")]
+    pub exam_header_enabled: bool,
+    #[serde(default = "default_true")]
+    pub exam_seal_enabled: bool,
+    #[serde(default = "default_exam_school")]
+    pub exam_school: String,
+    #[serde(default = "default_exam_title")]
+    pub exam_title: String,
+    /// A4 页边距（mm）
+    #[serde(default = "default_paper_margin_top")]
+    pub paper_margin_top: u32,
+    #[serde(default = "default_paper_margin_right")]
+    pub paper_margin_right: u32,
+    #[serde(default = "default_paper_margin_bottom")]
+    pub paper_margin_bottom: u32,
+    #[serde(default = "default_paper_margin_left")]
+    pub paper_margin_left: u32,
 }
 
 impl Default for Prefs {
@@ -189,6 +267,16 @@ impl Default for Prefs {
             user_css: String::new(),
             restore_last_folder: false,
             last_folder: None,
+            paper_layout: default_paper_layout(),
+            paper_style: default_paper_style(),
+            exam_header_enabled: true,
+            exam_seal_enabled: true,
+            exam_school: default_exam_school(),
+            exam_title: default_exam_title(),
+            paper_margin_top: default_paper_margin_top(),
+            paper_margin_right: default_paper_margin_right(),
+            paper_margin_bottom: default_paper_margin_bottom(),
+            paper_margin_left: default_paper_margin_left(),
         }
     }
 }
@@ -208,6 +296,16 @@ pub struct SettingsSetReq {
     pub assets_dir: Option<String>,
     pub user_css: Option<String>,
     pub restore_last_folder: Option<bool>,
+    pub paper_layout: Option<String>,
+    pub paper_style: Option<String>,
+    pub exam_header_enabled: Option<bool>,
+    pub exam_seal_enabled: Option<bool>,
+    pub exam_school: Option<String>,
+    pub exam_title: Option<String>,
+    pub paper_margin_top: Option<u32>,
+    pub paper_margin_right: Option<u32>,
+    pub paper_margin_bottom: Option<u32>,
+    pub paper_margin_left: Option<u32>,
 }
 
 fn config_dir() -> anyhow::Result<PathBuf> {
@@ -401,6 +499,16 @@ pub struct SettingsView {
     pub user_css: String,
     pub restore_last_folder: bool,
     pub last_folder: Option<String>,
+    pub paper_layout: String,
+    pub paper_style: String,
+    pub exam_header_enabled: bool,
+    pub exam_seal_enabled: bool,
+    pub exam_school: String,
+    pub exam_title: String,
+    pub paper_margin_top: u32,
+    pub paper_margin_right: u32,
+    pub paper_margin_bottom: u32,
+    pub paper_margin_left: u32,
 }
 
 pub fn settings_view() -> SettingsView {
@@ -423,6 +531,16 @@ pub fn settings_view() -> SettingsView {
         user_css: prefs.user_css.clone(),
         restore_last_folder: prefs.restore_last_folder,
         last_folder: prefs.last_folder.clone(),
+        paper_layout: normalize_paper_layout(&prefs.paper_layout),
+        paper_style: normalize_paper_style(&prefs.paper_style),
+        exam_header_enabled: prefs.exam_header_enabled,
+        exam_seal_enabled: prefs.exam_seal_enabled,
+        exam_school: prefs.exam_school.clone(),
+        exam_title: prefs.exam_title.clone(),
+        paper_margin_top: clamp_paper_margin_mm(prefs.paper_margin_top),
+        paper_margin_right: clamp_paper_margin_mm(prefs.paper_margin_right),
+        paper_margin_bottom: clamp_paper_margin_mm(prefs.paper_margin_bottom),
+        paper_margin_left: clamp_paper_margin_mm(prefs.paper_margin_left),
     }
 }
 
@@ -505,6 +623,42 @@ pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
     }
     if let Some(v) = req.restore_last_folder {
         prefs.restore_last_folder = v;
+    }
+    if let Some(v) = req.paper_layout.as_deref() {
+        prefs.paper_layout = normalize_paper_layout(v);
+    }
+    if let Some(v) = req.paper_style.as_deref() {
+        prefs.paper_style = normalize_paper_style(v);
+    }
+    if let Some(v) = req.exam_header_enabled {
+        prefs.exam_header_enabled = v;
+    }
+    if let Some(v) = req.exam_seal_enabled {
+        prefs.exam_seal_enabled = v;
+    }
+    if let Some(s) = req.exam_school {
+        let t: String = s.chars().take(120).collect();
+        if !t.trim().is_empty() {
+            prefs.exam_school = t;
+        }
+    }
+    if let Some(s) = req.exam_title {
+        let t: String = s.chars().take(120).collect();
+        if !t.trim().is_empty() {
+            prefs.exam_title = t;
+        }
+    }
+    if let Some(v) = req.paper_margin_top {
+        prefs.paper_margin_top = clamp_paper_margin_mm(v);
+    }
+    if let Some(v) = req.paper_margin_right {
+        prefs.paper_margin_right = clamp_paper_margin_mm(v);
+    }
+    if let Some(v) = req.paper_margin_bottom {
+        prefs.paper_margin_bottom = clamp_paper_margin_mm(v);
+    }
+    if let Some(v) = req.paper_margin_left {
+        prefs.paper_margin_left = clamp_paper_margin_mm(v);
     }
     save_prefs(&prefs)?;
 

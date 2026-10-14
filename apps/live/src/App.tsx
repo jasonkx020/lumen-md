@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -14,6 +20,8 @@ import {
   settingsSet,
   takeStartupFiles,
   markdownToHtmlString,
+  type PaperLayout,
+  type PaperStyle,
   type SettingsView,
 } from "./api";
 import type { AiCapabilityId } from "./ai/capabilities";
@@ -35,6 +43,7 @@ import {
 } from "./components/AiDiffModal";
 import { AiPanel, type AiPanelHandle } from "./components/AiPanel";
 import { CrepeEditor, type CrepeEditorHandle } from "./components/CrepeEditor";
+import { ExamPaperChrome } from "./components/ExamPaperChrome";
 import { setHtmlAssetDocAbs } from "./markdown/htmlAssetContext";
 import { rewriteHtmlImgSrcs } from "./markdown/rewriteHtmlAssets";
 import { FileTree } from "./components/FileTree";
@@ -130,6 +139,16 @@ export default function App() {
   const [recent, setRecent] = useState<{ path: string; kind: string }[]>([]);
   const [focusMode, setFocusMode] = useState(false);
   const [typewriterMode, setTypewriterMode] = useState(false);
+  const [paperLayout, setPaperLayout] = useState<PaperLayout>("fluid");
+  const [paperStyle, setPaperStyle] = useState<PaperStyle>("document");
+  const [examHeaderEnabled, setExamHeaderEnabled] = useState(true);
+  const [examSealEnabled, setExamSealEnabled] = useState(true);
+  const [examSchool, setExamSchool] = useState("（学校名称）");
+  const [examTitle, setExamTitle] = useState("（考试名称）");
+  const [paperMarginTop, setPaperMarginTop] = useState(18);
+  const [paperMarginRight, setPaperMarginRight] = useState(22);
+  const [paperMarginBottom, setPaperMarginBottom] = useState(24);
+  const [paperMarginLeft, setPaperMarginLeft] = useState(22);
   const [userCss, setUserCss] = useState("");
   const [findOpen, setFindOpen] = useState(false);
   const [findReplaceMode, setFindReplaceMode] = useState(false);
@@ -165,6 +184,24 @@ export default function App() {
     setRecent(v.recent ?? []);
     setFocusMode(!!v.focusMode);
     setTypewriterMode(!!v.typewriterMode);
+    setPaperLayout(v.paperLayout === "a4" ? "a4" : "fluid");
+    setPaperStyle(
+      v.paperStyle === "homework" || v.paperStyle === "exam"
+        ? v.paperStyle
+        : "document",
+    );
+    setExamHeaderEnabled(v.examHeaderEnabled !== false);
+    setExamSealEnabled(v.examSealEnabled !== false);
+    if (v.examSchool) setExamSchool(v.examSchool);
+    if (v.examTitle) setExamTitle(v.examTitle);
+    const clampMm = (n: number | undefined, d: number) => {
+      const x = Number.isFinite(n) ? Math.round(n as number) : d;
+      return Math.min(40, Math.max(5, x));
+    };
+    setPaperMarginTop(clampMm(v.paperMarginTop, 18));
+    setPaperMarginRight(clampMm(v.paperMarginRight, 22));
+    setPaperMarginBottom(clampMm(v.paperMarginBottom, 24));
+    setPaperMarginLeft(clampMm(v.paperMarginLeft, 22));
     setUserCss(v.userCss ?? "");
   }, []);
 
@@ -1256,6 +1293,40 @@ export default function App() {
             return next;
           });
           break;
+        case "paperLayoutFluid":
+          setPaperLayout("fluid");
+          void settingsSet({ paperLayout: "fluid" }).catch(() => {});
+          break;
+        case "paperLayoutA4":
+          setPaperLayout("a4");
+          void settingsSet({ paperLayout: "a4" }).catch(() => {});
+          break;
+        case "paperStyleDocument":
+          setPaperStyle("document");
+          void settingsSet({ paperStyle: "document" }).catch(() => {});
+          break;
+        case "paperStyleHomework":
+          setPaperStyle("homework");
+          void settingsSet({ paperStyle: "homework" }).catch(() => {});
+          break;
+        case "paperStyleExam":
+          setPaperStyle("exam");
+          void settingsSet({ paperStyle: "exam" }).catch(() => {});
+          break;
+        case "toggleExamHeader":
+          setExamHeaderEnabled((v) => {
+            const next = !v;
+            void settingsSet({ examHeaderEnabled: next }).catch(() => {});
+            return next;
+          });
+          break;
+        case "toggleExamSeal":
+          setExamSealEnabled((v) => {
+            const next = !v;
+            void settingsSet({ examSealEnabled: next }).catch(() => {});
+            return next;
+          });
+          break;
         case "newFile":
           void newFile();
           break;
@@ -1322,6 +1393,10 @@ export default function App() {
         title={title}
         sourceMode={sourceMode}
         recent={recent}
+        paperLayout={paperLayout}
+        paperStyle={paperStyle}
+        examHeaderEnabled={examHeaderEnabled}
+        examSealEnabled={examSealEnabled}
       />
       <TabBar
         tabs={tabs}
@@ -1355,22 +1430,64 @@ export default function App() {
             </div>
           ) : null}
           <div
-            className={sourceMode ? "editor-layer is-hidden" : "editor-layer"}
+            className={
+              (sourceMode ? "editor-layer is-hidden" : "editor-layer") +
+              (paperLayout === "a4" ? " is-paper-a4" : "")
+            }
           >
-            <CrepeEditor
-              key={htmlEnabled ? "html-on" : "html-off"}
-              ref={editorRef}
-              initialMarkdown={markdownRef.current}
-              onChange={markDirtyFrom}
-              onLinkClick={onEditorLinkClick}
-              onContextMenu={onEditorContextMenu}
-              onAssetError={(msg) => setStatus(`图片失败: ${msg}`)}
-              htmlEnabled={htmlEnabled}
-              docAbsPath={activeDocAbs}
-              focusMode={focusMode}
-              typewriterMode={typewriterMode}
-              className="crepe-host"
-            />
+            <div
+              className={
+                "paper-sheet" +
+                ` is-style-${paperStyle}` +
+                (paperLayout === "a4" ? " is-paper-a4" : "") +
+                (paperLayout === "a4" &&
+                paperStyle === "exam" &&
+                examSealEnabled
+                  ? " has-exam-seal"
+                  : "")
+              }
+              style={
+                paperLayout === "a4"
+                  ? ({
+                      ["--paper-mt"]: `${paperMarginTop}mm`,
+                      ["--paper-mr"]: `${paperMarginRight}mm`,
+                      ["--paper-mb"]: `${paperMarginBottom}mm`,
+                      ["--paper-ml"]: `${paperMarginLeft}mm`,
+                    } as CSSProperties)
+                  : undefined
+              }
+            >
+              {paperLayout === "a4" && paperStyle === "exam" ? (
+                <ExamPaperChrome
+                  school={examSchool}
+                  title={examTitle}
+                  headerEnabled={examHeaderEnabled}
+                  sealEnabled={examSealEnabled}
+                  onSchoolChange={(v) => {
+                    setExamSchool(v);
+                    void settingsSet({ examSchool: v }).catch(() => {});
+                  }}
+                  onTitleChange={(v) => {
+                    setExamTitle(v);
+                    void settingsSet({ examTitle: v }).catch(() => {});
+                  }}
+                />
+              ) : null}
+              <CrepeEditor
+                key={htmlEnabled ? "html-on" : "html-off"}
+                ref={editorRef}
+                initialMarkdown={markdownRef.current}
+                onChange={markDirtyFrom}
+                onLinkClick={onEditorLinkClick}
+                onContextMenu={onEditorContextMenu}
+                onAssetError={(msg) => setStatus(`图片失败: ${msg}`)}
+                htmlEnabled={htmlEnabled}
+                docAbsPath={activeDocAbs}
+                focusMode={focusMode}
+                typewriterMode={typewriterMode}
+                className="crepe-host"
+              />
+            </div>
           </div>
           <SourceEditor
             ref={sourceRef}
@@ -1417,6 +1534,12 @@ export default function App() {
           {tabs.length > 1 ? ` · ${tabs.length} 标签` : ""}
           {focusMode ? " · 专注" : ""}
           {typewriterMode ? " · 打字机" : ""}
+          {paperLayout === "a4" ? " · A4" : ""}
+          {paperStyle === "homework"
+            ? " · 作业纸"
+            : paperStyle === "exam"
+              ? " · 试卷"
+              : ""}
           {` · ${wordStats.words} 词 · ${wordStats.chars} 字 · ~${wordStats.readingMin} 分钟`}
         </span>
       </footer>
@@ -1452,6 +1575,12 @@ export default function App() {
         open={showSettings}
         onClose={() => setShowSettings(false)}
         onChanged={applySettingsView}
+        onPaperMarginsChange={(m) => {
+          setPaperMarginTop(m.top);
+          setPaperMarginRight(m.right);
+          setPaperMarginBottom(m.bottom);
+          setPaperMarginLeft(m.left);
+        }}
       />
       <AiDiffModal
         preview={aiDiff}
