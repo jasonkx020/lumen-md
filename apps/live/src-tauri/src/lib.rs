@@ -809,6 +809,29 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 解析「打开方式」/ 命令行传入的单个路径参数。
+///
+/// 注意：绝不能对裸盘符路径调用 `Url::parse`——`C:\foo.md` 会被解析成
+/// scheme=`c`，从而被误丢弃，导致双击 .md 永远只看到欢迎页。
+fn parse_open_path_arg(raw: &str) -> Option<PathBuf> {
+    let s = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    if s.is_empty() || s.starts_with('-') {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("file:") {
+        return url::Url::parse(s)
+            .ok()
+            .filter(|u| u.scheme().eq_ignore_ascii_case("file"))
+            .and_then(|u| u.to_file_path().ok());
+    }
+    Some(PathBuf::from(s))
+}
+
 /// 从命令行参数中提取可打开的 Markdown/文本路径。
 fn collect_open_files_from_args<I, S>(args: I) -> Vec<String>
 where
@@ -817,20 +840,7 @@ where
 {
     let mut out = Vec::new();
     for maybe in args {
-        let s = maybe.as_ref().trim();
-        if s.is_empty() || s.starts_with('-') {
-            continue;
-        }
-        let path = if let Ok(url) = url::Url::parse(s) {
-            if url.scheme() == "file" {
-                url.to_file_path().ok()
-            } else {
-                None
-            }
-        } else {
-            Some(PathBuf::from(s))
-        };
-        let Some(p) = path else {
+        let Some(p) = parse_open_path_arg(maybe.as_ref()) else {
             continue;
         };
         if !p.is_file() {
@@ -853,6 +863,50 @@ where
         }
     }
     out
+}
+
+#[cfg(test)]
+mod open_args_tests {
+    use super::parse_open_path_arg;
+    use std::path::PathBuf;
+
+    #[test]
+    fn drive_letter_path_not_dropped_as_url() {
+        // 回归：Url::parse("C:\\...") 会得到 scheme=c，旧逻辑直接丢弃路径
+        let raw = if cfg!(windows) {
+            r"C:\Users\Administrator\Documents\note.md"
+        } else {
+            r"C:\Users\Administrator\Documents\note.md"
+        };
+        let p = parse_open_path_arg(raw).expect("drive path must parse as filesystem path");
+        assert_eq!(p, PathBuf::from(raw));
+    }
+
+    #[test]
+    fn forward_slash_drive_path() {
+        let p = parse_open_path_arg("D:/docs/a.md").unwrap();
+        assert_eq!(p, PathBuf::from("D:/docs/a.md"));
+    }
+
+    #[test]
+    fn quoted_path_stripped() {
+        let p = parse_open_path_arg(r#""C:\temp\hello world.md""#).unwrap();
+        assert_eq!(p, PathBuf::from(r"C:\temp\hello world.md"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_url_parsed_windows() {
+        let p = parse_open_path_arg("file:///C:/temp/note.md").unwrap();
+        assert_eq!(p, PathBuf::from(r"C:\temp\note.md"));
+    }
+
+    #[test]
+    fn flags_and_empty_skipped() {
+        assert!(parse_open_path_arg("--flag").is_none());
+        assert!(parse_open_path_arg("").is_none());
+        assert!(parse_open_path_arg("   ").is_none());
+    }
 }
 
 /// 前端启动时取走命令行传入的文件路径（只取一次）。

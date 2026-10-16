@@ -848,6 +848,12 @@ body,
   height: 100%;
 }
 
+/* 源码模式：失焦后清掉当前行高亮，避免「焦点残留」 */
+.source-host .cm-editor:not(.cm-focused) .cm-activeLine,
+.source-host .cm-editor:not(.cm-focused) .cm-activeLineGutter {
+  background-color: transparent;
+}
+
 /* HTML-in-MD：块级在 Shadow DOM 内渲染（不受下列规则影响） */
 .html-md-node {
   display: block;
@@ -2081,6 +2087,17 @@ button.primary:disabled {
 
 .milkdown-code-block:has(.mermaid-preview-root) {
   position: relative;
+}
+
+/*
+ * 代码块内嵌 CodeMirror：basicSetup 的 highlightActiveLine 在失焦后仍保留
+ * cm-activeLine / gutter 高亮。只在编辑器真正 focused（且块被选中）时显示。
+ */
+.crepe-host .milkdown-code-block .cm-editor:not(.cm-focused) .cm-activeLine,
+.crepe-host .milkdown-code-block .cm-editor:not(.cm-focused) .cm-activeLineGutter,
+.crepe-host .milkdown-code-block:not(.selected) .cm-activeLine,
+.crepe-host .milkdown-code-block:not(.selected) .cm-activeLineGutter {
+  background-color: transparent !important;
 }
 
 /* 悬停时贴代码块最右上角；不依赖编辑态 */

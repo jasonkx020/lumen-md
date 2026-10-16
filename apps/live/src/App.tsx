@@ -673,7 +673,20 @@ export default function App() {
         setStatus(`已打开 ${existing.title}`);
         return;
       }
-      const next = [...tabsRef.current, tab];
+      // 双击/外部打开真实文件时，关掉未改动的「欢迎」页，避免仍显示内置示例
+      const isRealFile = !!(tab.absPath || tab.relPath);
+      const base = isRealFile
+        ? tabsRef.current.filter(
+            (t) =>
+              !(
+                t.title === "欢迎" &&
+                !t.dirty &&
+                !t.absPath &&
+                !t.relPath
+              ),
+          )
+        : tabsRef.current;
+      const next = [...base, tab];
       tabsRef.current = next;
       setTabs(next);
       setActiveId(tab.id);
@@ -981,8 +994,10 @@ export default function App() {
     const openPaths = async (paths: string[]) => {
       for (const p of paths) {
         if (disposed) return;
-        if (!isMdPath(p)) continue;
-        await handleDropPath(p);
+        // 后端已过滤扩展名；此处再挡一层，并容忍偶发引号
+        const cleaned = p.trim().replace(/^["']|["']$/g, "");
+        if (!isMdPath(cleaned)) continue;
+        await handleDropPath(cleaned);
       }
     };
 

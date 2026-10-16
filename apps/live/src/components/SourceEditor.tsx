@@ -146,10 +146,10 @@ export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
             color: "var(--muted)",
             border: "none",
           },
-          ".cm-activeLine": {
-            backgroundColor: "var(--editor-active-line)",
+          ".cm-activeLine, .cm-activeLineGutter": {
+            backgroundColor: "transparent",
           },
-          ".cm-activeLineGutter": {
+          "&.cm-focused .cm-activeLine, &.cm-focused .cm-activeLineGutter": {
             backgroundColor: "var(--editor-active-line)",
           },
           "&.cm-focused .cm-cursor": {
