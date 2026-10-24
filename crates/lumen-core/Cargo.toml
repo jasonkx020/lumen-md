@@ -10,3 +10,5 @@ serde = { workspace = true }
 comrak = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# pin: 0.8.42+ needs edition2024 / rustc 1.88 (workspace is 1.77)
+encoding_rs = "=0.8.35"

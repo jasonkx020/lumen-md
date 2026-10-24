@@ -120,6 +120,7 @@ export default function App() {
   const markdownRef = useRef(WELCOME);
   const tabsRef = useRef<EditorTab[]>([]);
   const activeIdRef = useRef<string | null>(null);
+  const handleDropPathRef = useRef<(path: string) => Promise<void>>(async () => {});
 
   const initial = bootstrapTab();
   const [tabs, setTabs] = useState<EditorTab[]>([initial]);
@@ -986,7 +987,9 @@ export default function App() {
     ],
   );
 
-  // 系统「打开方式」/ 命令行传入的文件：冷启动 + 二次实例
+  handleDropPathRef.current = handleDropPath;
+
+  // 系统「打开方式」/ 命令行传入的文件：冷启动 + 二次实例（mount-once，经 ref 调用最新 handler）
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -994,10 +997,9 @@ export default function App() {
     const openPaths = async (paths: string[]) => {
       for (const p of paths) {
         if (disposed) return;
-        // 后端已过滤扩展名；此处再挡一层，并容忍偶发引号
         const cleaned = p.trim().replace(/^["']|["']$/g, "");
         if (!isMdPath(cleaned)) continue;
-        await handleDropPath(cleaned);
+        await handleDropPathRef.current(cleaned);
       }
     };
 
@@ -1008,7 +1010,7 @@ export default function App() {
           await openPaths(startup);
         }
       } catch {
-        /* 非 Tauri / 命令未注册 */
+        /* non-tauri */
       }
     })();
 
@@ -1019,15 +1021,15 @@ export default function App() {
         if (disposed) fn();
         else unlisten = fn;
       })
-      .catch(() => {
-        /* not in tauri */
+      .catch((e) => {
+        console.warn("open-files listen failed", e);
       });
 
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [handleDropPath]);
+  }, []);
 
   const toggleSourceMode = useCallback(() => {
     setSourceMode((prev) => {
@@ -1202,22 +1204,32 @@ export default function App() {
     }
     void getCurrentWindow()
       .onDragDropEvent((event) => {
-        if (event.payload.type === "drop" && event.payload.paths?.[0]) {
-          void handleDropPath(event.payload.paths[0]);
-        }
+        if (event.payload.type !== "drop") return;
+        const paths = event.payload.paths ?? [];
+        if (paths.length === 0) return;
+        void (async () => {
+          for (const p of paths) {
+            if (disposed) return;
+            try {
+              await handleDropPathRef.current(p);
+            } catch (e) {
+              setStatus(`拖放失败: ${e}`);
+            }
+          }
+        })();
       })
       .then((fn) => {
         if (disposed) fn();
         else unlisten = fn;
       })
-      .catch(() => {
-        /* not in tauri */
+      .catch((e) => {
+        setStatus(`拖放监听未就绪: ${e}`);
       });
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [handleDropPath]);
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

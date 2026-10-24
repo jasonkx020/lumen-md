@@ -24,6 +24,11 @@ npm run tauri build
 
 安装包已改为 **embedBootstrapper**（内嵌 WebView2 引导程序），不再在安装时临时下载执行外部 bootstrapper。
 
+## 双击打开与拖放（Windows）
+
+- **双击打开**：需安装 NSIS/MSI 安装包后才会写入 `.md` 文件关联；开发态可用 `npm run tauri dev -- path\to\file.md` 验证。
+- **拖放**：请勿以管理员身份运行，否则 Win11 下从资源管理器拖入可能被 UIPI 拦截。
+
 ### 调试包 vs 正式包
 
 | 形态 | 说明 |

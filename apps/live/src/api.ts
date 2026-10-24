@@ -42,7 +42,7 @@ export async function openAbsoluteFile(path: string): Promise<OpenFileResult> {
   return invoke("open_absolute_file", { path });
 }
 
-/** 取走启动命令行中的待打开文件路径（只取一次）。 */
+/** 排空待打开队列（冷启动命令行 + 二次实例推入的路径）。 */
 export async function takeStartupFiles(): Promise<string[]> {
   return invoke("take_startup_files");
 }

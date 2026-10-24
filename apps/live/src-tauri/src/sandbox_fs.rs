@@ -121,7 +121,7 @@ impl Workspace {
             );
         }
         let bytes = fs::read(&path)?;
-        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("仅支持 UTF-8"))
+        decode_text_bytes(bytes)
     }
 
     pub fn write_text(&self, rel: &str, content: &str) -> anyhow::Result<()> {
@@ -165,6 +165,29 @@ impl Workspace {
     }
 }
 
+/// Decode file bytes: UTF-8 → GB18030 → BOM-sniff → GB18030 lossy.
+fn decode_text_bytes(bytes: Vec<u8>) -> anyhow::Result<String> {
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let bytes = e.into_bytes();
+            let (cow, _enc, had_errors) = encoding_rs::GB18030.decode(&bytes);
+            if !had_errors {
+                return Ok(cow.into_owned());
+            }
+            if let Some((enc, offset)) = encoding_rs::Encoding::for_bom(&bytes) {
+                let (cow, _, had) = enc.decode(&bytes[offset..]);
+                if !had {
+                    return Ok(cow.into_owned());
+                }
+            }
+            // Last resort: GB18030 lossy so drag-open works on messy Win GBK files
+            let (cow, _, _) = encoding_rs::GB18030.decode(&bytes);
+            Ok(cow.into_owned())
+        }
+    }
+}
+
 fn path_under(path: &Path, root: &Path) -> bool {
     let Ok(p) = fs::canonicalize(path) else {
         return path.starts_with(root);
@@ -186,7 +209,7 @@ pub fn read_abs_text(path: &Path) -> anyhow::Result<String> {
         );
     }
     let bytes = fs::read(path)?;
-    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("仅支持 UTF-8"))
+    decode_text_bytes(bytes)
 }
 
 /// 原子写入绝对路径（独立文件模式）。

@@ -127,8 +127,7 @@ impl Workspace {
             );
         }
         let bytes = fs::read(&path)?;
-        let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("仅支持 UTF-8"))?;
-        Ok(text)
+        decode_text_bytes(bytes)
     }
 
     /// 原子写：tmp → flush → rename。
@@ -174,6 +173,29 @@ impl Workspace {
         }
         self.write_text(rel, "")?;
         Ok(())
+    }
+}
+
+/// Decode file bytes: UTF-8 → GB18030 → BOM-sniff → GB18030 lossy.
+fn decode_text_bytes(bytes: Vec<u8>) -> anyhow::Result<String> {
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let bytes = e.into_bytes();
+            let (cow, _enc, had_errors) = encoding_rs::GB18030.decode(&bytes);
+            if !had_errors {
+                return Ok(cow.into_owned());
+            }
+            if let Some((enc, offset)) = encoding_rs::Encoding::for_bom(&bytes) {
+                let (cow, _, had) = enc.decode(&bytes[offset..]);
+                if !had {
+                    return Ok(cow.into_owned());
+                }
+            }
+            // Last resort: GB18030 lossy so open works on messy Win GBK files
+            let (cow, _, _) = encoding_rs::GB18030.decode(&bytes);
+            Ok(cow.into_owned())
+        }
     }
 }
 

@@ -23,7 +23,7 @@ pub struct AppState {
     pub workspace: Mutex<Option<Workspace>>,
     /// 独立打开过的绝对路径白名单（多 Tab 可同时多个）。
     pub allowed_abs: Mutex<HashSet<PathBuf>>,
-    /// 启动时通过命令行传入的待打开 Markdown 路径（前端 take 一次后清空）。
+    /// 冷启动与二次实例共用的待打开队列（前端 take 后清空）。
     pub startup_files: Mutex<Vec<String>>,
 }
 
@@ -909,7 +909,7 @@ mod open_args_tests {
     }
 }
 
-/// 前端启动时取走命令行传入的文件路径（只取一次）。
+/// 排空待打开队列（冷启动命令行 + 二次实例推入的路径）。
 #[tauri::command]
 fn take_startup_files(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     Ok(std::mem::take(&mut *state.startup_files.lock()))
@@ -950,17 +950,28 @@ fn relativize(path: &Path, root: &Path) -> Option<String> {
 pub fn run() {
     let startup = collect_open_files_from_args(std::env::args().skip(1));
 
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init());
-
+    let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
+        use tauri::Manager;
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let files = collect_open_files_from_args(argv.iter().skip(1).map(|s| s.as_str()));
-            emit_open_files(app, files);
+            if !files.is_empty() {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let mut q = state.startup_files.lock();
+                    for f in &files {
+                        if !q.iter().any(|x| x == f) {
+                            q.push(f.clone());
+                        }
+                    }
+                }
+                emit_open_files(app, files);
+            }
         }));
     }
+    builder = builder
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
 
     let state = AppState {
         startup_files: Mutex::new(startup),
