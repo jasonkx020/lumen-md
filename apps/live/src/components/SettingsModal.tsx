@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { settingsGet, settingsSet, type SettingsView } from "../api";
+import {
+  AI_CAPABILITIES,
+  SELECTION_WRITEBACK_IDS,
+  type AiCapabilityId,
+} from "../ai/capabilities";
+
+function defaultReplaceMap(): Record<string, boolean> {
+  const m: Record<string, boolean> = {};
+  for (const id of SELECTION_WRITEBACK_IDS) m[id] = true;
+  return m;
+}
 
 const PAPER_MARGIN_PRESETS = [
   { id: "narrow", label: "窄", top: 12, right: 12, bottom: 12, left: 12 },
@@ -41,6 +52,9 @@ export function SettingsModal({
   const [assetsDir, setAssetsDir] = useState("assets");
   const [userCss, setUserCss] = useState("");
   const [restoreLastFolder, setRestoreLastFolder] = useState(false);
+  const [aiReplaceByCapability, setAiReplaceByCapability] = useState<
+    Record<string, boolean>
+  >(() => defaultReplaceMap());
   const [paperMarginTop, setPaperMarginTop] = useState(18);
   const [paperMarginRight, setPaperMarginRight] = useState(22);
   const [paperMarginBottom, setPaperMarginBottom] = useState(24);
@@ -105,6 +119,10 @@ export function SettingsModal({
         setAssetsDir(v.assetsDir || "assets");
         setUserCss(v.userCss || "");
         setRestoreLastFolder(!!v.restoreLastFolder);
+        setAiReplaceByCapability({
+          ...defaultReplaceMap(),
+          ...(v.aiReplaceByCapability ?? {}),
+        });
         setPaperMarginTop(clampMarginMm(v.paperMarginTop ?? 18));
         setPaperMarginRight(clampMarginMm(v.paperMarginRight ?? 22));
         setPaperMarginBottom(clampMarginMm(v.paperMarginBottom ?? 24));
@@ -153,12 +171,17 @@ export function SettingsModal({
         assetsDir: assetsDir.trim() || "assets",
         userCss,
         restoreLastFolder,
+        aiReplaceByCapability,
         paperMarginTop: clampMarginMm(paperMarginTop),
         paperMarginRight: clampMarginMm(paperMarginRight),
         paperMarginBottom: clampMarginMm(paperMarginBottom),
         paperMarginLeft: clampMarginMm(paperMarginLeft),
       });
       setView(v);
+      setAiReplaceByCapability({
+        ...defaultReplaceMap(),
+        ...(v.aiReplaceByCapability ?? {}),
+      });
       setPaperMarginTop(clampMarginMm(v.paperMarginTop));
       setPaperMarginRight(clampMarginMm(v.paperMarginRight));
       setPaperMarginBottom(clampMarginMm(v.paperMarginBottom));
@@ -225,6 +248,50 @@ export function SettingsModal({
               spellCheck={false}
             />
           </label>
+        </section>
+
+        <section className="settings-section">
+          <h3>AI 写回</h3>
+          <p className="settings-hint">
+            勾选「替换选区」时，启用结果会直接覆盖所选内容；取消勾选则插在选区后并保留原文。默认均为替换。
+          </p>
+          {(
+            [
+              ["write", "写作"],
+              ["subject", "学科"],
+            ] as const
+          ).map(([mode, title]) => {
+            const items = AI_CAPABILITIES.filter(
+              (c) =>
+                c.mode === mode &&
+                SELECTION_WRITEBACK_IDS.includes(c.id as AiCapabilityId),
+            );
+            if (!items.length) return null;
+            return (
+              <div key={mode} className="settings-ai-writeback-group">
+                <h4 className="settings-subheading">{title}</h4>
+                {items.map((c) => (
+                  <label className="settings-row" key={c.id}>
+                    <input
+                      type="checkbox"
+                      checked={aiReplaceByCapability[c.id] !== false}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setAiReplaceByCapability((prev) => ({
+                          ...prev,
+                          [c.id]: checked,
+                        }));
+                      }}
+                    />
+                    <span>
+                      {c.label}
+                      <span className="settings-row-muted"> · 替换选区</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            );
+          })}
         </section>
 
         <section className="settings-section">

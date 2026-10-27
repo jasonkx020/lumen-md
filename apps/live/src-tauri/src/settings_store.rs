@@ -4,8 +4,31 @@
 use directories::ProjectDirs;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+/// 支持「选区写回」的 AI 能力 id（与前端 SELECTION_WRITEBACK_IDS 对齐）
+const AI_SELECTION_WRITEBACK_IDS: &[&str] = &[
+    "polish",
+    "expand",
+    "exam_stem",
+    "translate",
+    "summarize",
+    "change_tone",
+    "gen_formula",
+    "gen_mermaid",
+    "gen_table",
+];
+
+fn filled_ai_replace_map(raw: &HashMap<String, bool>) -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    for id in AI_SELECTION_WRITEBACK_IDS {
+        // 缺省 true = 直接替换选区
+        out.insert((*id).to_string(), raw.get(*id).copied().unwrap_or(true));
+    }
+    out
+}
 
 const SERVICE: &str = "lumen-md-live";
 
@@ -210,6 +233,9 @@ pub struct Prefs {
     pub paper_margin_bottom: u32,
     #[serde(default = "default_paper_margin_left")]
     pub paper_margin_left: u32,
+    /// 各 AI 能力是否直接替换选区；缺省键视为 true
+    #[serde(default)]
+    pub ai_replace_by_capability: HashMap<String, bool>,
 }
 
 impl Default for Prefs {
@@ -240,6 +266,7 @@ impl Default for Prefs {
             paper_margin_right: default_paper_margin_right(),
             paper_margin_bottom: default_paper_margin_bottom(),
             paper_margin_left: default_paper_margin_left(),
+            ai_replace_by_capability: HashMap::new(),
         }
     }
 }
@@ -270,6 +297,8 @@ pub struct SettingsSetReq {
     pub paper_margin_right: Option<u32>,
     pub paper_margin_bottom: Option<u32>,
     pub paper_margin_left: Option<u32>,
+    /// 部分或完整更新；仅合并已知选区写回能力键
+    pub ai_replace_by_capability: Option<HashMap<String, bool>>,
 }
 
 fn config_dir() -> anyhow::Result<PathBuf> {
@@ -473,6 +502,7 @@ pub struct SettingsView {
     pub paper_margin_right: u32,
     pub paper_margin_bottom: u32,
     pub paper_margin_left: u32,
+    pub ai_replace_by_capability: HashMap<String, bool>,
 }
 
 pub fn settings_view() -> SettingsView {
@@ -505,6 +535,7 @@ pub fn settings_view() -> SettingsView {
         paper_margin_right: clamp_paper_margin_mm(prefs.paper_margin_right),
         paper_margin_bottom: clamp_paper_margin_mm(prefs.paper_margin_bottom),
         paper_margin_left: clamp_paper_margin_mm(prefs.paper_margin_left),
+        ai_replace_by_capability: filled_ai_replace_map(&prefs.ai_replace_by_capability),
     }
 }
 
@@ -627,6 +658,15 @@ pub fn apply_settings(req: SettingsSetReq) -> anyhow::Result<SettingsView> {
     }
     if let Some(v) = req.paper_margin_left {
         prefs.paper_margin_left = clamp_paper_margin_mm(v);
+    }
+    if let Some(patch) = req.ai_replace_by_capability {
+        for id in AI_SELECTION_WRITEBACK_IDS {
+            if let Some(v) = patch.get(*id) {
+                prefs
+                    .ai_replace_by_capability
+                    .insert((*id).to_string(), *v);
+            }
+        }
     }
     save_prefs(&prefs)?;
 

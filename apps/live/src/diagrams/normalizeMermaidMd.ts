@@ -48,6 +48,21 @@ export function extractMermaidSource(text: string): string | null {
 }
 
 /**
+ * 确保结果为单一 ```mermaid 围栏（与 Diff 的 extractMermaidSource 对齐）。
+ * 可吃掉前言说明；抽不出图源则原样返回。
+ */
+export function ensureMermaidFence(text: string): string {
+  const t = text.trim();
+  if (!t) return t;
+  const extracted = extractMermaidSource(t);
+  if (extracted) {
+    return "```mermaid\n" + extracted + "\n```";
+  }
+  if (/^```\s*mermaid\b/i.test(t)) return t;
+  return t;
+}
+
+/**
  * 对 markdown 中的 fenced code：
  * - lang=mermaid：去掉 body 内 `\[` `\]`
  * - 无 lang / text / txt：若 body 像图，同样 unescape，并补上 `mermaid` 语言标签

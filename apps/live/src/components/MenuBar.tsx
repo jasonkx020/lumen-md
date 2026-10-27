@@ -46,6 +46,11 @@ export type MenuAction =
   | "inlineCode"
   | "link"
   | "strikethrough"
+  | "textColor:default"
+  | "textColor:muted"
+  | "textColor:accent"
+  | "textColor:hint"
+  | "textColor:danger"
   | "toggleSource"
   | "toggleSidebar"
   | "toggleOutline"
@@ -138,6 +143,12 @@ const MENUS: MenuDef[] = [
       { type: "item", label: "删除线", action: "strikethrough" },
       { type: "item", label: "行内代码", action: "inlineCode" },
       { type: "item", label: "链接", action: "link", shortcut: "Ctrl+K" },
+      { type: "sep" },
+      { type: "item", label: "文字颜色：恢复默认", action: "textColor:default" },
+      { type: "item", label: "文字颜色：灰色", action: "textColor:muted" },
+      { type: "item", label: "文字颜色：强调色", action: "textColor:accent" },
+      { type: "item", label: "文字颜色：提示色", action: "textColor:hint" },
+      { type: "item", label: "文字颜色：警示色", action: "textColor:danger" },
     ],
   },
   {

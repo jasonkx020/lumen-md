@@ -22,13 +22,14 @@ import {
 import { replaceAll, replaceRange } from "@milkdown/kit/utils";
 import { upload, uploadConfig } from "@milkdown/kit/plugin/upload";
 import { codeBlockConfig } from "@milkdown/kit/component/code-block";
-import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
-import { normalizeGithubHtml } from "../markdown/normalizeGithubHtml";
 import {
   extractMermaidSource,
-  normalizeMermaidFencesInMarkdown,
   prepareMermaidSource,
 } from "../diagrams/normalizeMermaidMd";
+import {
+  ensureFormulaMarkdown,
+  extractFormulaLatex,
+} from "../formula/normalizeFormulaMd";
 import {
   DEFAULT_MERMAID_TEMPLATE,
   mermaidMenuIcon,
@@ -37,10 +38,8 @@ import {
   renderMermaidPreview,
   shouldRenderMermaid,
 } from "../diagrams/mermaidPreview";
-import {
-  decodeImageAltFromCrepe,
-  encodeImageAltForCrepe,
-} from "../markdown/crepeImageAlt";
+import { decodeImageAltFromCrepe } from "../markdown/crepeImageAlt";
+import { normalizeIncomingMarkdown } from "../markdown/normalizeIncomingMd";
 import {
   htmlBlockPreviewView,
   htmlPreviewView,
@@ -104,8 +103,11 @@ export type CrepeEditorHandle = {
   getSelection: () => string | null;
   getSelectionMeta: () => SelectionMeta | null;
   replaceSelection: (text: string) => boolean;
-  /** 在光标处插入 Markdown（可替换当前选区） */
-  insertMarkdownAtCursor: (md: string) => boolean;
+  /** 在光标处插入 Markdown；afterSelection 时保留选区、在终点后插入 */
+  insertMarkdownAtCursor: (
+    md: string,
+    opts?: { afterSelection?: boolean },
+  ) => boolean;
   /** 用保存的 from/to 写回（对比弹窗会丢掉选区） */
   replaceRangeAt: (from: number, to: number, text: string) => boolean;
   /** 按纯文本偏移近似选中（查找用） */
@@ -116,10 +118,20 @@ export type CrepeEditorHandle = {
   openFormulaInsert: (kind?: FormulaDisplayKind) => void;
   /** 在光标处插入 Mermaid 代码块（与斜杠菜单一致） */
   insertMermaidAtCursor: () => boolean;
-  /** 在光标处插入指定源码的 Mermaid 块（AI 生成用，走代码块节点以触发预览） */
-  insertMermaidSourceAtCursor: (source: string) => boolean;
+  /** 在光标处插入指定源码的 Mermaid 块；afterSelection 保留选区 */
+  insertMermaidSourceAtCursor: (
+    source: string,
+    opts?: { afterSelection?: boolean },
+  ) => boolean;
+  /** 在光标处插入 LaTeX 公式块；afterSelection 保留选区 */
+  insertLatexSourceAtCursor: (
+    source: string,
+    opts?: { afterSelection?: boolean },
+  ) => boolean;
   /** 恢复 ProseMirror 文档坐标选区（对比弹窗启用前调用） */
   restoreSelection: (from: number, to: number) => boolean;
+  /** 折叠选区到终点（不删内容），供 insert_after_selection 使用 */
+  collapseSelectionToEnd: () => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -150,14 +162,6 @@ function createImageNodes(schema: Schema, src: string, alt: string): PmNode[] {
     if (n) return [n];
   }
   return [];
-}
-
-function normalizeIncomingMarkdown(md: string): string {
-  return encodeImageAltForCrepe(
-    normalizeMermaidFencesInMarkdown(
-      normalizeGithubHtml(normalizeGfmTables(md)),
-    ),
-  );
 }
 
 /** 面向源码/保存的 Markdown（还原 image-block 弄丢的 alt） */
@@ -192,11 +196,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
     const [formulaReq, setFormulaReq] = useState<FormulaEditRequest | null>(
       null,
     );
-    const lastMdRef = useRef(
-      normalizeMermaidFencesInMarkdown(
-        normalizeGithubHtml(normalizeGfmTables(initialMarkdown)),
-      ),
-    );
+    const lastMdRef = useRef(normalizeIncomingMarkdown(initialMarkdown));
     const onChangeRef = useRef(onChange);
     const onLinkClickRef = useRef(onLinkClick);
     const onContextMenuRef = useRef(onContextMenu);
@@ -246,9 +246,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
         // 打开文件时父组件可能同步调用 setMarkdown，早于本次 render；
         // 用 ref 再刷一次上下文，避免相对图片按错误/空文档路径解析。
         setHtmlAssetDocAbs(docAbsRef.current);
-        const base = normalizeMermaidFencesInMarkdown(
-          normalizeGithubHtml(normalizeGfmTables(md)),
-        );
+        const base = normalizeIncomingMarkdown(md);
         lastMdRef.current = base;
         const c = crepeRef.current;
         if (!c || !readyRef.current) return;
@@ -265,9 +263,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
       },
       replaceDocumentMarkdown: (md: string) => {
         setHtmlAssetDocAbs(docAbsRef.current);
-        const base = normalizeMermaidFencesInMarkdown(
-          normalizeGithubHtml(normalizeGfmTables(md)),
-        );
+        const base = normalizeIncomingMarkdown(md);
         lastMdRef.current = base;
         const c = crepeRef.current;
         if (!c || !readyRef.current) return;
@@ -383,9 +379,61 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           return false;
         }
       },
-      insertMarkdownAtCursor: (md: string) => {
+      collapseSelectionToEnd: () => {
         const c = crepeRef.current;
         if (!c || !readyRef.current) return false;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const { to } = view.state.selection;
+            const max = view.state.doc.content.size;
+            const pos = Math.max(1, Math.min(to, max));
+            try {
+              const sel = TextSelection.create(view.state.doc, pos);
+              view.dispatch(view.state.tr.setSelection(sel));
+              ok = true;
+            } catch {
+              const sel = TextSelection.near(view.state.doc.resolve(pos));
+              view.dispatch(view.state.tr.setSelection(sel));
+              ok = true;
+            }
+          });
+          return ok;
+        } catch {
+          return false;
+        }
+      },
+      insertMarkdownAtCursor: (md: string, opts?: { afterSelection?: boolean }) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        const after = !!opts?.afterSelection;
+        if (after) {
+          // 先折叠到选区终点，后续插入不再覆盖原文
+          try {
+            c.editor.action((ctx) => {
+              const view = ctx.get(editorViewCtx);
+              const { to } = view.state.selection;
+              const max = view.state.doc.content.size;
+              const pos = Math.max(1, Math.min(to, max));
+              try {
+                view.dispatch(
+                  view.state.tr.setSelection(
+                    TextSelection.create(view.state.doc, pos),
+                  ),
+                );
+              } catch {
+                view.dispatch(
+                  view.state.tr.setSelection(
+                    TextSelection.near(view.state.doc.resolve(pos)),
+                  ),
+                );
+              }
+            });
+          } catch {
+            /* continue */
+          }
+        }
         // Mermaid：replaceRange 无法稳定得到可预览 code_block，改走围栏追加（与菜单一致）
         const mermaidBody = extractMermaidSource(md);
         if (mermaidBody) {
@@ -401,8 +449,23 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             return false;
           }
         }
+        // 公式：裸 LaTeX / $$ 统一抽出后走 LaTeX code_block（与块级公式预览一致）
+        const latexBody = extractFormulaLatex(md);
+        if (latexBody) {
+          try {
+            const cur = c.getMarkdown();
+            applyMarkdown(
+              c,
+              `${cur.trimEnd()}\n\n${ensureFormulaMarkdown(latexBody)}\n`,
+              false,
+            );
+            return true;
+          } catch {
+            /* fall through to generic insert */
+          }
+        }
         const normalized = normalizeIncomingMarkdown(
-          md.trim().replace(/\r\n/g, "\n"),
+          ensureFormulaMarkdown(md.trim().replace(/\r\n/g, "\n")),
         );
         const payload = normalized ? `\n\n${normalized}\n\n` : md;
         try {
@@ -410,15 +473,21 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           c.editor.action((ctx) => {
             const view = ctx.get(editorViewCtx);
             const { from, to } = view.state.selection;
-            if (selectionTouchesTable(view.state.doc, from, to)) {
-              // 表内退化为纯文本插入
+            // afterSelection 时 from===to（已折叠），插入不删字
+            const insertFrom = after ? to : from;
+            const insertTo = after ? to : to;
+            if (selectionTouchesTable(view.state.doc, insertFrom, insertTo)) {
               view.dispatch(
-                view.state.tr.insertText(md.replace(/\n+/g, " "), from, to),
+                view.state.tr.insertText(
+                  md.replace(/\n+/g, " "),
+                  insertFrom,
+                  insertTo,
+                ),
               );
               ok = true;
               return;
             }
-            replaceRange(payload, { from, to })(ctx);
+            replaceRange(payload, { from: insertFrom, to: insertTo })(ctx);
             ok = true;
           });
           return ok;
@@ -628,7 +697,97 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           return false;
         }
       },
-      insertMermaidSourceAtCursor: (source: string) => {
+      insertLatexSourceAtCursor: (
+        source: string,
+        opts?: { afterSelection?: boolean },
+      ) => {
+        const c = crepeRef.current;
+        if (!c || !readyRef.current) return false;
+        const body = extractFormulaLatex(source) || source.trim();
+        if (!body) return false;
+        const after = !!opts?.afterSelection;
+        try {
+          let ok = false;
+          c.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const codeBlock = codeBlockSchema.type(ctx);
+            const { state } = view;
+            const node = codeBlock.create(
+              { language: "LaTeX" },
+              state.schema.text(body),
+            );
+            let tr = state.tr;
+            if (!state.selection.empty) {
+              if (after) {
+                // 保留选区：折叠到终点再插入
+                const end = state.selection.to;
+                tr = tr.setSelection(TextSelection.create(state.doc, end));
+              } else {
+                tr = tr.deleteSelection();
+              }
+            }
+            const $ = tr.selection.$from;
+            if (
+              $.depth === 1 &&
+              $.parent.type.name === "paragraph" &&
+              $.parent.content.size === 0
+            ) {
+              tr = tr.replaceWith($.before(), $.after(), node);
+              view.dispatch(tr.scrollIntoView());
+              view.focus();
+              ok = true;
+              return;
+            }
+            let insertPos: number | null = null;
+            for (let d = $.depth; d >= 1; d--) {
+              const parent = $.node(d);
+              const index = $.index(d);
+              if (parent.canReplaceWith(index + 1, index + 1, codeBlock)) {
+                insertPos = $.after(d);
+                break;
+              }
+            }
+            if (insertPos == null) {
+              const end = tr.doc.content.size;
+              if (
+                tr.doc.canReplaceWith(
+                  tr.doc.childCount,
+                  tr.doc.childCount,
+                  codeBlock,
+                )
+              ) {
+                insertPos = end;
+              }
+            }
+            if (insertPos == null) return;
+            tr = tr.insert(insertPos, node);
+            tr = tr.setSelection(
+              TextSelection.near(tr.doc.resolve(insertPos + 1)),
+            );
+            view.dispatch(tr.scrollIntoView());
+            view.focus();
+            ok = true;
+          });
+          if (ok) return true;
+        } catch {
+          /* fall through */
+        }
+        try {
+          const md = c.getMarkdown();
+          applyMarkdown(
+            c,
+            `${md.trimEnd()}\n\n${ensureFormulaMarkdown(body)}\n`,
+            false,
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      insertMermaidSourceAtCursor: (
+        source: string,
+        opts?: { afterSelection?: boolean },
+      ) => {
         const c = crepeRef.current;
         if (!c || !readyRef.current) return false;
         // 入参可以是纯源码或带围栏/前言的 AI 全文
@@ -636,6 +795,7 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
           extractMermaidSource(source) ||
           prepareMermaidSource(source) ||
           DEFAULT_MERMAID_TEMPLATE;
+        const after = !!opts?.afterSelection;
         try {
           let ok = false;
           c.editor.action((ctx) => {
@@ -648,7 +808,12 @@ export const CrepeEditor = forwardRef<CrepeEditorHandle, Props>(
             );
             let tr = state.tr;
             if (!state.selection.empty) {
-              tr = tr.deleteSelection();
+              if (after) {
+                const end = state.selection.to;
+                tr = tr.setSelection(TextSelection.create(state.doc, end));
+              } else {
+                tr = tr.deleteSelection();
+              }
             }
             const $ = tr.selection.$from;
             // 空顶层段落：直接替换为 code_block

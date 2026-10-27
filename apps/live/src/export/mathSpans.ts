@@ -17,7 +17,12 @@ function atLineStart(src: string, i: number): boolean {
   return i === 0 || src[i - 1] === "\n";
 }
 
-/** 收集 `$…$` / `$$…$$` / ```math 公式区间（跳过普通代码围栏）。 */
+function isMathFenceInfo(info: string): boolean {
+  const lang = info.split(/\s+/)[0] ?? "";
+  return lang === "math" || lang === "latex" || lang === "tex";
+}
+
+/** 收集 `$…$` / `$$…$$` / ```math|latex|tex 公式区间（跳过普通代码围栏）。 */
 export function collectMathSpans(src: string): MathSpan[] {
   const out: MathSpan[] = [];
   let i = 0;
@@ -41,7 +46,7 @@ export function collectMathSpans(src: string): MathSpan[] {
         ? bodyStart - 1 + m.index + m[0].length
         : src.length;
       const bodyEnd = m ? bodyStart - 1 + m.index : src.length;
-      if (info === "math") {
+      if (isMathFenceInfo(info)) {
         const tex = src.slice(bodyStart, bodyEnd).replace(/^\n+|\n+$/g, "");
         if (tex.trim()) {
           out.push({ start: i, end: fenceEnd, tex, display: true });

@@ -67,6 +67,13 @@ import { runExport } from "./export/runExport";
 import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
 import { extractMermaidSource } from "./diagrams/normalizeMermaidMd";
+import { extractFormulaLatex } from "./formula/normalizeFormulaMd";
+import {
+  applyTextColorId,
+  isTextColorMenuAction,
+  textColorIdFromAction,
+} from "./markdown/textColor";
+import { normalizeIncomingMarkdown } from "./markdown/normalizeIncomingMd";
 import { prepareCellInlineText } from "./markdown/tableCellSelection";
 import { countWords, footnoteHintCss, nextFootnoteRef, splitFrontMatter, upsertToc } from "./chrome/docUtils";
 import { importAssetPath, isImagePath, saveAssetFile } from "./assets/saveAsset";
@@ -137,6 +144,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [htmlEnabled, setHtmlEnabled] = useState(true);
+  const [aiReplaceByCapability, setAiReplaceByCapability] = useState<
+    Record<string, boolean>
+  >({});
   const [hasAiKey, setHasAiKey] = useState(false);
   const [aiKeyInvalid, setAiKeyInvalid] = useState(false);
   const [supportsMultimodal, setSupportsMultimodal] = useState(false);
@@ -176,6 +186,7 @@ export default function App() {
 
   const applySettingsView = useCallback((v: SettingsView) => {
     setHtmlEnabled(v.htmlEnabled);
+    setAiReplaceByCapability(v.aiReplaceByCapability ?? {});
     setHasAiKey(v.requiresApiKey ? v.hasKey : true);
     if (!v.requiresApiKey || v.hasKey) setAiKeyInvalid(false);
     setSupportsMultimodal(!!v.supportsMultimodal);
@@ -339,22 +350,45 @@ export default function App() {
         to?: number;
         inTableCell?: boolean;
         tableSelectionBlocked?: boolean;
-        writeMode?: "replace_selection" | "replace_document" | "insert_at_cursor";
+        writeMode?:
+          | "replace_selection"
+          | "replace_document"
+          | "insert_at_cursor"
+          | "insert_after_selection";
       },
     ): boolean => {
-      if (range?.writeMode === "insert_at_cursor") {
-        // 与 Diff 预览共用 extractMermaidSource，避免前言/围栏识别不一致
+      const insertMode =
+        range?.writeMode === "insert_at_cursor" ||
+        range?.writeMode === "insert_after_selection";
+      if (insertMode) {
+        const afterSel = range?.writeMode === "insert_after_selection";
+        const insertOpts = afterSel ? { afterSelection: true } : undefined;
+        // 与 Diff 预览共用抽取逻辑，避免前言/围栏识别不一致
         const mermaidSrc = !sourceMode ? extractMermaidSource(text) : null;
-        if (!sourceMode && range.from != null && range.to != null) {
+        const latexSrc =
+          !sourceMode && !mermaidSrc ? extractFormulaLatex(text) : null;
+        if (!sourceMode && range?.from != null && range.to != null) {
           editorRef.current?.restoreSelection(range.from, range.to);
         } else if (!sourceMode) {
           editorRef.current?.focus();
         }
+        // 源码模式：afterSelection 时用字符偏移选区
+        if (sourceMode && afterSel && range?.from != null && range.to != null) {
+          sourceRef.current?.selectRange(range.from, range.to);
+        }
         const ok = sourceMode
-          ? sourceRef.current?.insertAtCursor(text)
+          ? sourceRef.current?.insertAtCursor(text, insertOpts)
           : mermaidSrc
-            ? editorRef.current?.insertMermaidSourceAtCursor(mermaidSrc)
-            : editorRef.current?.insertMarkdownAtCursor(text);
+            ? editorRef.current?.insertMermaidSourceAtCursor(
+                mermaidSrc,
+                insertOpts,
+              )
+            : latexSrc
+              ? editorRef.current?.insertLatexSourceAtCursor(
+                  latexSrc,
+                  insertOpts,
+                )
+              : editorRef.current?.insertMarkdownAtCursor(text, insertOpts);
         if (ok) {
           markDirtyFrom(currentEditorMarkdown());
           return true;
@@ -366,6 +400,40 @@ export default function App() {
           return false;
         }
 
+        // Mermaid/公式：replaceRange 围栏文本常落不成可预览 code_block（Diff 能看、启用后无图）。
+        // 与 insert 路径一致，直接建节点（会删掉当前选区）。
+        if (!sourceMode && !range?.inTableCell) {
+          const mermaidSrc = extractMermaidSource(text);
+          const latexSrc = !mermaidSrc ? extractFormulaLatex(text) : null;
+          if (mermaidSrc || latexSrc) {
+            if (range?.from != null && range?.to != null) {
+              editorRef.current?.restoreSelection(range.from, range.to);
+            } else {
+              editorRef.current?.focus();
+            }
+            const ok = mermaidSrc
+              ? editorRef.current?.insertMermaidSourceAtCursor(mermaidSrc)
+              : editorRef.current?.insertLatexSourceAtCursor(latexSrc!);
+            if (ok) {
+              markDirtyFrom(currentEditorMarkdown());
+              return true;
+            }
+          }
+        }
+
+        // 与 insert/整篇路径一致：表外块级结果先规范化，否则 Diff 能预览、写回却不成表/图
+        // 表/HTML 等再包一层空行，避免 replaceRange 落在段落中间解析失败
+        const blockText = range?.inTableCell
+          ? prepareCellInlineText(text)
+          : (() => {
+              const n = normalizeIncomingMarkdown(text).trim();
+              if (!n) return text;
+              if (/^\|/.test(n) || /^<(?:table|div|details)\b/i.test(n)) {
+                return `\n\n${n}\n\n`;
+              }
+              return n;
+            })();
+
         // 优先用保存的 from/to（对比弹窗会丢掉选区）
         if (
           !sourceMode &&
@@ -376,17 +444,13 @@ export default function App() {
           const ok = editorRef.current?.replaceRangeAt(
             range.from,
             range.to,
-            range.inTableCell ? prepareCellInlineText(text) : text,
+            blockText,
           );
           if (ok) {
             markDirtyFrom(currentEditorMarkdown());
             return true;
           }
         }
-
-        const payload = range?.inTableCell
-          ? prepareCellInlineText(text)
-          : text;
 
         const ok = sourceMode
           ? sourceRef.current?.replaceSelection(
@@ -405,10 +469,10 @@ export default function App() {
                     return prepareCellInlineText(text);
                   }
                 }
-                return text;
+                return blockText;
               })(),
             )
-          : editorRef.current?.replaceSelection(payload);
+          : editorRef.current?.replaceSelection(blockText);
         if (ok) {
           markDirtyFrom(currentEditorMarkdown());
           return true;
@@ -427,7 +491,9 @@ export default function App() {
             const inPipeRow =
               range?.inTableCell ||
               (/^\s*\|/.test(line) && line.includes("|", 1));
-            const insert = inPipeRow ? prepareCellInlineText(text) : text;
+            const insert = inPipeRow
+              ? prepareCellInlineText(text)
+              : blockText;
             const next =
               md.slice(0, idx) + insert + md.slice(idx + before.length);
             // 保留撤销栈：勿用 setMarkdown（flush 会清空 history）
@@ -466,19 +532,24 @@ export default function App() {
       }, 1000);
       try {
         const md = currentEditorMarkdown();
-        const selMeta = sourceMode
+        const liveMeta = sourceMode
           ? null
           : editorRef.current?.getSelectionMeta() ?? null;
-        if (selMeta?.tableSelectionBlocked) {
+        const sourceRange = sourceMode
+          ? sourceRef.current?.getSelectionRange() ?? null
+          : null;
+        if (liveMeta?.tableSelectionBlocked) {
           const msg = "表内选区写回失败，请只选中同一单元格内的文字";
           setStatus(msg);
           setAiPanelStatus(msg);
           return;
         }
-        // 空选区时 selMeta.text 为 ""（仍带光标坐标）；勿用 ?? 吃掉空串
-        const selection = selMeta?.text?.trim()
-          ? selMeta.text
-          : getEditorSelection();
+        // 空选区时 liveMeta.text 为 ""（仍带光标坐标）；勿用 ?? 吃掉空串
+        const selection = liveMeta?.text?.trim()
+          ? liveMeta.text
+          : sourceRange?.text?.trim()
+            ? sourceRange.text
+            : getEditorSelection();
         const result = await runAiCapability({
           id,
           markdown: md,
@@ -488,6 +559,7 @@ export default function App() {
           supportsMultimodal,
           paperStyle,
           paperLayout,
+          aiReplaceByCapability,
         });
         setAiDiff({
           label: result.label,
@@ -496,10 +568,10 @@ export default function App() {
           replaceSelection: result.replaceSelection,
           writeMode: result.writeMode,
           warn: result.warn,
-          from: selMeta?.from,
-          to: selMeta?.to,
-          inTableCell: selMeta?.inTableCell,
-          tableSelectionBlocked: selMeta?.tableSelectionBlocked,
+          from: liveMeta?.from ?? sourceRange?.from,
+          to: liveMeta?.to ?? sourceRange?.to,
+          inTableCell: liveMeta?.inTableCell,
+          tableSelectionBlocked: liveMeta?.tableSelectionBlocked,
           // 识图：把用户附图带进 Diff，左侧展示上传图（勿渲染文档内图片）
           inputImages:
             id === "image_to_md" ? [...aiImages] : undefined,
@@ -530,6 +602,7 @@ export default function App() {
       aiImages,
       aiKeyInvalid,
       aiNote,
+      aiReplaceByCapability,
       currentEditorMarkdown,
       paperLayout,
       paperStyle,
@@ -1426,6 +1499,27 @@ export default function App() {
             applyTheme(themeId);
             break;
           }
+          if (isTextColorMenuAction(action)) {
+            const id = textColorIdFromAction(action);
+            const sel = getEditorSelection();
+            if (!sel) {
+              setStatus("请先选中要着色的文本");
+              break;
+            }
+            const next = applyTextColorId(sel, id);
+            const ok = sourceMode
+              ? sourceRef.current?.replaceSelection(next)
+              : editorRef.current?.replaceSelection(next);
+            if (ok) {
+              markDirtyFrom(currentEditorMarkdown());
+              setStatus(
+                id === "default" ? "已恢复默认色" : `已设置文字颜色`,
+              );
+            } else {
+              setStatus("着色失败：无法写回选区");
+            }
+            break;
+          }
           if (!sourceMode) {
             runFormatAction(editorRef.current?.getCrepe() ?? null, action);
           }
@@ -1441,7 +1535,9 @@ export default function App() {
       doExport,
       doSave,
       doSaveAs,
+      getEditorSelection,
       insertOrUpdateToc,
+      markDirtyFrom,
       newFile,
       openFileDialog,
       openFolderDialog,

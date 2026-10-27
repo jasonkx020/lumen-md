@@ -1,7 +1,7 @@
 import { llmComplete } from "../api";
-import {
-  looksLikeMermaidDiagram,
-} from "../diagrams/normalizeMermaidMd";
+import { ensureMermaidFence } from "../diagrams/normalizeMermaidMd";
+import { ensureFormulaMarkdown } from "../formula/normalizeFormulaMd";
+import { normalizeGfmTables } from "../markdown/normalizeGfmTables";
 import {
   buildUserMessage,
   getCapability,
@@ -9,20 +9,6 @@ import {
   type AiCapabilityId,
   type AiWriteMode,
 } from "./capabilities";
-
-/** 确保流程图结果带 ```mermaid 围栏，否则 Live 不会走预览。 */
-function ensureMermaidFence(text: string): string {
-  const t = text.trim();
-  if (!t) return t;
-  if (/^```\s*mermaid\b/i.test(t)) return t;
-  // 被剥成「mermaid\nflowchart…」或纯图源
-  const body = t.replace(/^mermaid\s*\n/i, "").trim();
-  if (looksLikeMermaidDiagram(body) || looksLikeMermaidDiagram(t)) {
-    const src = looksLikeMermaidDiagram(body) ? body : t;
-    return "```mermaid\n" + src + "\n```";
-  }
-  return t;
-}
 
 export type RunAiInput = {
   id: AiCapabilityId;
@@ -33,6 +19,8 @@ export type RunAiInput = {
   supportsMultimodal?: boolean;
   paperStyle?: string;
   paperLayout?: string;
+  /** 各能力是否替换选区；缺省 true */
+  aiReplaceByCapability?: Record<string, boolean> | null;
 };
 
 export type RunAiResult = {
@@ -60,13 +48,17 @@ export async function runAiCapability(input: RunAiInput): Promise<RunAiResult> {
     }
   }
 
-  const scoped = resolveCapabilityContent(input.id, {
-    markdown: input.markdown,
-    selection: input.selection,
-    note: input.note,
-    paperStyle: input.paperStyle,
-    paperLayout: input.paperLayout,
-  });
+  const scoped = resolveCapabilityContent(
+    input.id,
+    {
+      markdown: input.markdown,
+      selection: input.selection,
+      note: input.note,
+      paperStyle: input.paperStyle,
+      paperLayout: input.paperLayout,
+    },
+    { aiReplaceByCapability: input.aiReplaceByCapability },
+  );
 
   // 学科类：note 已并入 content，避免重复
   const noteForMsg =
@@ -88,6 +80,13 @@ export async function runAiCapability(input: RunAiInput): Promise<RunAiResult> {
   });
   if (input.id === "gen_mermaid") {
     text = ensureMermaidFence(text);
+  }
+  if (input.id === "gen_table") {
+    text = normalizeGfmTables(text);
+  }
+  if (input.id === "gen_formula") {
+    // 模型常返回裸 \begin{aligned}…，无 $$ / ```latex 则 Crepe 当正文，无法渲染
+    text = ensureFormulaMarkdown(text);
   }
   return {
     before: scoped.content,

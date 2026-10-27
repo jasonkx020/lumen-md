@@ -9,7 +9,11 @@ import { runGithubHtmlSelfCheck } from "./githubHtml.selfcheck";
 import { runPictureThemeSelfCheck } from "./pictureTheme.selfcheck";
 import { runMermaidNormalizeSelfCheck } from "../diagrams/mermaidNormalize.selfcheck";
 import { runMermaidEditSelfCheck } from "../diagrams/mermaidEdit.selfcheck";
+import { runNormalizeGfmTablesSelfCheck } from "./normalizeGfmTables.selfcheck";
 import { runMathExportSelfCheck } from "../export/mathExport.selfcheck";
+import { runNormalizeFormulaSelfcheck } from "../formula/normalizeFormula.selfcheck";
+import { runCapabilitiesWriteModeSelfcheck } from "../ai/capabilities.selfcheck";
+import { runTextColorSelfcheck } from "./textColor.selfcheck";
 
 export function runSanitizeSelfCheck(): string[] {
   const errors: string[] = [];
@@ -95,7 +99,17 @@ export function runSanitizeSelfCheck(): string[] {
   errors.push(...runPictureThemeSelfCheck().map((e) => `pictureTheme:${e}`));
   errors.push(...runMermaidNormalizeSelfCheck().map((e) => `mermaid:${e}`));
   errors.push(...runMermaidEditSelfCheck().map((e) => `mermaidEdit:${e}`));
+  errors.push(
+    ...runNormalizeGfmTablesSelfCheck().map((e) => `gfmTables:${e}`),
+  )
   errors.push(...runMathExportSelfCheck().map((e) => `mathExport:${e}`));
+  errors.push(
+    ...runNormalizeFormulaSelfcheck().map((e) => `formulaNormalize:${e}`),
+  );
+  errors.push(
+    ...runCapabilitiesWriteModeSelfcheck().map((e) => `aiWriteMode:${e}`),
+  );
+  errors.push(...runTextColorSelfcheck().map((e) => `textColor:${e}`));
 
   return errors;
 }

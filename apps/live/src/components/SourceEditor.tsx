@@ -34,8 +34,14 @@ export type SourceEditorHandle = {
   selectRange: (from: number, to: number) => void;
   focus: () => void;
   getSelection: () => string | null;
+  /** 选区字符偏移（供 AI insert_after_selection） */
+  getSelectionRange: () => { from: number; to: number; text: string } | null;
   replaceSelection: (text: string) => boolean;
-  insertAtCursor: (text: string) => boolean;
+  /** 插入文本；afterSelection 时保留选区原文，在终点后插入 */
+  insertAtCursor: (
+    text: string,
+    opts?: { afterSelection?: boolean },
+  ) => boolean;
   getHost: () => HTMLElement | null;
 };
 
@@ -95,6 +101,15 @@ export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
         const text = view.state.sliceDoc(from, to);
         return text.trim() ? text : null;
       },
+      getSelectionRange: () => {
+        const view = viewRef.current;
+        if (!view) return null;
+        const { from, to } = view.state.selection.main;
+        if (from === to) return null;
+        const text = view.state.sliceDoc(from, to);
+        if (!text.trim()) return null;
+        return { from, to, text };
+      },
       replaceSelection: (text: string) => {
         const view = viewRef.current;
         if (!view) return false;
@@ -106,11 +121,19 @@ export const SourceEditor = forwardRef<SourceEditorHandle, Props>(
         });
         return true;
       },
-      insertAtCursor: (text: string) => {
+      insertAtCursor: (text: string, opts?: { afterSelection?: boolean }) => {
         const view = viewRef.current;
         if (!view) return false;
         const { from, to } = view.state.selection.main;
         const insert = text.trim() ? `\n\n${text.trim()}\n\n` : text;
+        if (opts?.afterSelection) {
+          // 保留选区，在 to 后插入
+          view.dispatch({
+            changes: { from: to, to, insert },
+            selection: { anchor: to + insert.length },
+          });
+          return true;
+        }
         view.dispatch({
           changes: { from, to, insert },
           selection: { anchor: from + insert.length },

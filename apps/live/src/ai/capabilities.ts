@@ -24,7 +24,9 @@ export type AiScope =
 export type AiWriteMode =
   | "replace_selection"
   | "replace_document"
-  | "insert_at_cursor";
+  | "insert_at_cursor"
+  /** 保留选区原文，在选区终点后插入 */
+  | "insert_after_selection";
 
 export type AiCapability = {
   id: AiCapabilityId;
@@ -39,7 +41,45 @@ export type AiCapability = {
   /** 主面板「更多」折叠 */
   more?: boolean;
   requiresMultimodal?: boolean;
+  /** 有选区时可配置替换/插后（出现在设置「AI 写回」） */
+  selectionWriteback?: boolean;
 };
+
+/** 支持选区写回配置的能力 id */
+export const SELECTION_WRITEBACK_IDS: AiCapabilityId[] = [
+  "polish",
+  "expand",
+  "exam_stem",
+  "translate",
+  "summarize",
+  "change_tone",
+  "gen_formula",
+  "gen_mermaid",
+  "gen_table",
+];
+
+export function supportsSelectionWriteback(id: AiCapabilityId): boolean {
+  return SELECTION_WRITEBACK_IDS.includes(id);
+}
+
+/** 未配置时默认 true = 直接替换选区 */
+export function aiReplaceForCapability(
+  id: AiCapabilityId,
+  map?: Record<string, boolean> | null,
+): boolean {
+  if (!supportsSelectionWriteback(id)) return true;
+  if (!map) return true;
+  return map[id] !== false;
+}
+
+export function selectionWriteMode(
+  id: AiCapabilityId,
+  map?: Record<string, boolean> | null,
+): Extract<AiWriteMode, "replace_selection" | "insert_after_selection"> {
+  return aiReplaceForCapability(id, map)
+    ? "replace_selection"
+    : "insert_after_selection";
+}
 
 const COMMON_TAIL = `
 输出要求：
@@ -56,6 +96,7 @@ export const AI_CAPABILITIES: AiCapability[] = [
     mode: "write",
     scope: "selection_required",
     writeMode: "replace_selection",
+    selectionWriteback: true,
     quickAction: true,
     systemPrompt: `你是中文教学文稿润色助手。在不改变事实与原意的前提下，让表达更通顺、适合学生阅读。
 规则：
@@ -72,6 +113,7 @@ ${COMMON_TAIL}`,
     mode: "write",
     scope: "selection_required",
     writeMode: "replace_selection",
+    selectionWriteback: true,
     quickAction: true,
     systemPrompt: `你是 Markdown 扩写助手。将用户选中的提纲、要点或短句扩展为完整、可读的段落。
 规则：
@@ -88,6 +130,7 @@ ${COMMON_TAIL}`,
     mode: "write",
     scope: "selection_required",
     writeMode: "replace_selection",
+    selectionWriteback: true,
     quickAction: true,
     systemPrompt: `你是出题助手。将用户选中的内容改写成规范的试题题干体例（中小学/教辅常用）。
 规则：
@@ -100,15 +143,18 @@ ${COMMON_TAIL}`,
   {
     id: "gen_formula",
     label: "生成公式",
-    description: "根据说明或选区生成 LaTeX（插入光标）",
+    description: "根据说明或选区生成 LaTeX",
     mode: "subject",
     scope: "note_or_selection",
-    writeMode: "insert_at_cursor",
+    writeMode: "replace_selection",
+    selectionWriteback: true,
     systemPrompt: `你是 LaTeX 公式助手。根据用户描述或选中文本，输出可直接写入 Markdown 的公式。
 规则：
-- 行内公式用 $...$；独立公式用单独一行的 $$...$$ 或 \`\`\`LaTeX 围栏
+- 行内公式用 $...$；独立/多行公式必须用单独的 $$...$$（推荐）或 \`\`\`latex 围栏
+- 禁止只输出裸 \\begin{…} 而不加 $$ 或围栏（否则无法渲染）
+- 中文、品牌名等文字用 \\text{中文}，不要只用 \\mathrm{中文}
+- 化学式可用 \\mathrm{} / mhchem 风格命令
 - 只输出公式相关 Markdown，不要解释
-- 化学式优先用 \\mathrm{} / 常见 mhchem 风格命令（若适用）
 ${COMMON_TAIL}`,
   },
   {
@@ -117,7 +163,8 @@ ${COMMON_TAIL}`,
     description: "根据步骤生成 Mermaid flowchart",
     mode: "subject",
     scope: "note_or_selection",
-    writeMode: "insert_at_cursor",
+    writeMode: "replace_selection",
+    selectionWriteback: true,
     systemPrompt: `你是 Mermaid 流程图助手。根据用户给出的步骤或说明，输出一个完整的 Mermaid 代码块。
 规则：
 - 使用 \`\`\`mermaid 围栏，默认 flowchart TB 或 LR
@@ -131,7 +178,8 @@ ${COMMON_TAIL}`,
     description: "根据说明生成 Markdown 表格",
     mode: "subject",
     scope: "note_or_selection",
-    writeMode: "insert_at_cursor",
+    writeMode: "replace_selection",
+    selectionWriteback: true,
     systemPrompt: `你是 Markdown 表格助手。根据用户列说明或数据，输出标准 GFM 管道表格。
 规则：
 - 必须包含表头分隔行 |---|
@@ -194,6 +242,7 @@ ${COMMON_TAIL}`,
     mode: "write",
     scope: "selection_preferred",
     writeMode: "replace_selection",
+    selectionWriteback: true,
     more: true,
     systemPrompt: `你是翻译助手。将用户给出的内容翻译为通顺、准确的目标语言。
 规则：
@@ -208,7 +257,8 @@ ${COMMON_TAIL}`,
     description: "生成选区或全文摘要",
     mode: "write",
     scope: "selection_preferred",
-    writeMode: "insert_at_cursor",
+    writeMode: "replace_selection",
+    selectionWriteback: true,
     more: true,
     systemPrompt: `你是摘要助手。为用户给出的内容生成简洁、信息完整的摘要。
 规则：
@@ -224,6 +274,7 @@ ${COMMON_TAIL}`,
     mode: "write",
     scope: "selection_preferred",
     writeMode: "replace_selection",
+    selectionWriteback: true,
     more: true,
     systemPrompt: `你是文风调整助手。按用户补充说明中的语气要求改写文本。
 规则：
@@ -274,6 +325,10 @@ export type ResolveScopeInput = {
   paperLayout?: string;
 };
 
+export type ResolveScopeOpts = {
+  aiReplaceByCapability?: Record<string, boolean> | null;
+};
+
 export type ResolveScopeResult = {
   content: string;
   writeMode: AiWriteMode;
@@ -282,30 +337,43 @@ export type ResolveScopeResult = {
   warn?: string;
 };
 
-function selectionOrThrow(
-  sel: string | null,
-  msg: string,
+function selectionWriteResult(
+  id: AiCapabilityId,
+  content: string,
+  map?: Record<string, boolean> | null,
 ): ResolveScopeResult {
-  if (!sel) throw new Error(msg);
+  const writeMode = selectionWriteMode(id, map);
   return {
-    content: sel,
-    writeMode: "replace_selection",
-    replaceSelection: true,
+    content,
+    writeMode,
+    replaceSelection: writeMode === "replace_selection",
   };
 }
 
+function selectionOrThrow(
+  id: AiCapabilityId,
+  sel: string | null,
+  msg: string,
+  map?: Record<string, boolean> | null,
+): ResolveScopeResult {
+  if (!sel) throw new Error(msg);
+  return selectionWriteResult(id, sel, map);
+}
+
 function noteOrSelection(
+  id: AiCapabilityId,
   input: ResolveScopeInput,
   emptyMsg: string,
+  map?: Record<string, boolean> | null,
 ): ResolveScopeResult {
   const sel = input.selection?.trim() ? input.selection.trim() : "";
   const note = input.note?.trim() ? input.note.trim() : "";
   if (sel) {
-    return {
-      content: note ? `${note}\n\n${sel}` : sel,
-      writeMode: "insert_at_cursor",
-      replaceSelection: false,
-    };
+    return selectionWriteResult(
+      id,
+      note ? `${note}\n\n${sel}` : sel,
+      map,
+    );
   }
   if (note) {
     return {
@@ -327,31 +395,39 @@ function withPaperMeta(content: string, input: ResolveScopeInput): string {
 export function resolveCapabilityContent(
   id: AiCapabilityId,
   input: ResolveScopeInput,
+  opts?: ResolveScopeOpts,
 ): ResolveScopeResult {
   const sel = input.selection?.trim() ? input.selection : null;
   const cap = getCapability(id);
+  const map = opts?.aiReplaceByCapability;
 
   switch (id) {
     case "polish":
-      return selectionOrThrow(sel, "请先选中要润色的文本");
+      return selectionOrThrow(id, sel, "请先选中要润色的文本", map);
     case "expand":
-      return selectionOrThrow(sel, "请先选中要扩写的要点或段落");
+      return selectionOrThrow(id, sel, "请先选中要扩写的要点或段落", map);
     case "exam_stem":
-      return selectionOrThrow(sel, "请先选中要改成题干的文本");
+      return selectionOrThrow(id, sel, "请先选中要改成题干的文本", map);
     case "gen_formula":
       return noteOrSelection(
+        id,
         input,
         "请先选中文本，或在补充说明中写清公式含义",
+        map,
       );
     case "gen_mermaid":
       return noteOrSelection(
+        id,
         input,
         "请先选中步骤说明，或在补充说明中描述流程",
+        map,
       );
     case "gen_table":
       return noteOrSelection(
+        id,
         input,
         "请先选中内容，或在补充说明中描述表格列与数据",
+        map,
       );
     case "exam_skeleton":
       return {
@@ -385,11 +461,7 @@ export function resolveCapabilityContent(
     case "translate":
     case "change_tone": {
       if (sel) {
-        return {
-          content: sel,
-          writeMode: "replace_selection",
-          replaceSelection: true,
-        };
+        return selectionWriteResult(id, sel, map);
       }
       return {
         content: input.markdown,
@@ -399,11 +471,7 @@ export function resolveCapabilityContent(
     }
     case "summarize":
       if (sel) {
-        return {
-          content: sel,
-          writeMode: "insert_at_cursor",
-          replaceSelection: false,
-        };
+        return selectionWriteResult(id, sel, map);
       }
       return {
         content: input.markdown,

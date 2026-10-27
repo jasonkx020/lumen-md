@@ -110,6 +110,8 @@ export type SettingsView = {
   paperMarginRight: number;
   paperMarginBottom: number;
   paperMarginLeft: number;
+  /** 各 AI 能力是否直接替换选区（缺省 true） */
+  aiReplaceByCapability: Record<string, boolean>;
 };
 
 export async function settingsGet(): Promise<SettingsView> {
@@ -140,6 +142,7 @@ export async function settingsSet(args: {
   paperMarginRight?: number;
   paperMarginBottom?: number;
   paperMarginLeft?: number;
+  aiReplaceByCapability?: Record<string, boolean>;
 }): Promise<SettingsView> {
   return invoke("settings_set", {
     req: {
@@ -166,6 +169,7 @@ export async function settingsSet(args: {
       paperMarginRight: args.paperMarginRight ?? null,
       paperMarginBottom: args.paperMarginBottom ?? null,
       paperMarginLeft: args.paperMarginLeft ?? null,
+      aiReplaceByCapability: args.aiReplaceByCapability ?? null,
     },
   });
 }

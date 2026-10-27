@@ -2,6 +2,7 @@
  * Mermaid 规范化自检（无需浏览器 DOM）。
  */
 import {
+  ensureMermaidFence,
   extractMermaidSource,
   looksLikeMermaidDiagram,
   normalizeMermaidFencesInMarkdown,
@@ -92,6 +93,18 @@ export function runMermaidNormalizeSelfCheck(): string[] {
   }
   if (!extractMermaidSource("flowchart TB\nA-->B")) {
     errors.push("extractMermaidSource bare diagram failed");
+  }
+
+  const fencedOnly = ensureMermaidFence(withPreamble);
+  if (fencedOnly !== "```mermaid\nflowchart LR\nA-->B\n```") {
+    errors.push(`ensureMermaidFence preamble: ${JSON.stringify(fencedOnly)}`);
+  }
+  const bareFenced = ensureMermaidFence("flowchart TB\nA-->B");
+  if (bareFenced !== "```mermaid\nflowchart TB\nA-->B\n```") {
+    errors.push(`ensureMermaidFence bare: ${JSON.stringify(bareFenced)}`);
+  }
+  if (ensureMermaidFence(bareFenced) !== bareFenced) {
+    errors.push("ensureMermaidFence should be idempotent on clean fence");
   }
 
   return errors;

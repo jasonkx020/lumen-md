@@ -1435,6 +1435,26 @@ button.primary:disabled {
   word-break: break-all;
 }
 
+.settings-subheading {
+  margin: 10px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-ai-writeback-group {
+  margin-top: 4px;
+}
+
+.settings-ai-writeback-group .settings-row {
+  margin: 4px 0;
+}
+
+.settings-row-muted {
+  color: var(--muted);
+  font-weight: 400;
+}
+
 .settings-margin-presets {
   display: flex;
   gap: 6px;
@@ -2298,6 +2318,16 @@ button.primary:disabled {
   cursor: pointer;
 }
 
+.mermaid-edit-btn.mermaid-shape-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0.25em;
+  cursor: pointer;
+}
+
 .mermaid-edit-btn:hover {
   border-color: color-mix(in srgb, CanvasText 40%, transparent);
   background: color-mix(in srgb, Canvas 84%, CanvasText);
@@ -2309,17 +2339,13 @@ button.primary:disabled {
   color: #1d4ed8;
 }
 
-.mermaid-edit-hint,
-.mermaid-edit-status {
+.mermaid-edit-hint {
   color: color-mix(in srgb, CanvasText 55%, transparent);
   font-size: 11px;
 }
 
-.mermaid-edit-status:not(:empty) {
-  margin-left: 0.25em;
-}
-
 .mermaid-preview {
+  position: relative;
   text-align: center;
   overflow-x: auto;
 }
@@ -2331,15 +2357,206 @@ button.primary:disabled {
 
 .milkdown-code-block.selected .mermaid-preview g.node,
 .milkdown-code-block.mermaid-editing .mermaid-preview g.node {
+  cursor: default;
+}
+
+.milkdown-code-block.mermaid-editing .mermaid-preview-root.mermaid-drag-linking,
+.milkdown-code-block.mermaid-editing
+  .mermaid-preview-root.mermaid-drag-linking
+  .mermaid-preview
+  g.node {
+  cursor: crosshair;
+}
+
+/* SVG 内锚点：静默隐藏；仅悬停该节点时显示 */
+.mermaid-preview .mermaid-svg-port {
+  fill: #ffffff !important;
+  stroke: #2563eb !important;
+  stroke-width: 2px !important;
+  opacity: 0;
+  pointer-events: none;
+  cursor: crosshair;
+  vector-effect: non-scaling-stroke;
+}
+
+.milkdown-code-block.selected
+  .mermaid-preview
+  g[data-mmd-id]:hover
+  > .mermaid-svg-port,
+.milkdown-code-block.mermaid-editing
+  .mermaid-preview
+  g[data-mmd-id]:hover
+  > .mermaid-svg-port {
+  opacity: 1 !important;
+  pointer-events: all !important;
+}
+
+.mermaid-preview-root.mermaid-drag-linking .mermaid-svg-port {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.mermaid-preview g[data-mmd-id]:hover > .mermaid-svg-port:hover {
+  fill: #2563eb !important;
+}
+
+.mermaid-ctx-menu {
+  position: fixed;
+  z-index: 1400;
+  min-width: 8.5rem;
+  padding: 0.25em;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 6px;
+  background: Canvas;
+  box-shadow: 0 6px 20px color-mix(in srgb, CanvasText 18%, transparent);
+  font-size: 12px;
+}
+
+.mermaid-ctx-item {
+  display: block;
+  width: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0.4em 0.65em;
+  border-radius: 4px;
+  font: inherit;
   cursor: pointer;
+}
+
+.mermaid-ctx-item:hover {
+  background: color-mix(in srgb, #2563eb 14%, Canvas);
+}
+
+.mermaid-shape-pick {
+  position: fixed;
+  z-index: 1400;
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.35em;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 8px;
+  background: Canvas;
+  box-shadow: 0 6px 20px color-mix(in srgb, CanvasText 18%, transparent);
+}
+
+.mermaid-shape-pick-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0.3em;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, Canvas 92%, CanvasText);
+  color: inherit;
+  cursor: pointer;
+}
+
+.mermaid-shape-pick-btn:hover {
+  border-color: #2563eb;
+  background: color-mix(in srgb, #2563eb 16%, Canvas);
+  color: #1d4ed8;
+}
+
+.mermaid-shape-pick-btn svg {
+  display: block;
+}
+
+.mermaid-rename-pop {
+  position: fixed;
+  z-index: 1500;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35em;
+  max-width: min(92vw, 320px);
+  padding: 0.45em 0.55em;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 6px;
+  background: Canvas;
+  box-shadow: 0 8px 24px color-mix(in srgb, CanvasText 20%, transparent);
+  font-size: 12px;
+}
+
+.mermaid-rename-label {
+  flex: 1 0 100%;
+  color: color-mix(in srgb, CanvasText 55%, transparent);
+  font-size: 11px;
+}
+
+.mermaid-rename-input {
+  flex: 1 1 auto;
+  min-width: 8rem;
+  border: 1px solid color-mix(in srgb, CanvasText 28%, transparent);
+  border-radius: 4px;
+  padding: 0.3em 0.45em;
+  font: inherit;
+  color: inherit;
+  background: color-mix(in srgb, Canvas 96%, CanvasText);
+}
+
+.mermaid-rename-ok {
+  appearance: none;
+  border: 1px solid #2563eb;
+  border-radius: 4px;
+  padding: 0.3em 0.65em;
+  font: inherit;
+  cursor: pointer;
+  background: color-mix(in srgb, #2563eb 18%, Canvas);
+  color: #1d4ed8;
+}
+
+.mermaid-preview g[data-mmd-id].mermaid-node-selected > rect,
+.mermaid-preview g[data-mmd-id].mermaid-node-selected > polygon,
+.mermaid-preview g[data-mmd-id].mermaid-node-selected > circle,
+.mermaid-preview g[data-mmd-id].mermaid-node-selected > path {
+  stroke: #2563eb !important;
+  stroke-width: 2.5px !important;
+  filter: drop-shadow(0 0 0.5px #2563eb);
 }
 
 .mermaid-preview g.node.mermaid-link-from > rect,
 .mermaid-preview g.node.mermaid-link-from > polygon,
 .mermaid-preview g.node.mermaid-link-from > circle,
-.mermaid-preview g.node.mermaid-link-from > path {
+.mermaid-preview g.node.mermaid-link-from > path,
+.mermaid-preview g.node.mermaid-link-hover > rect,
+.mermaid-preview g.node.mermaid-link-hover > polygon,
+.mermaid-preview g.node.mermaid-link-hover > circle,
+.mermaid-preview g.node.mermaid-link-hover > path {
   stroke: #2563eb !important;
   stroke-width: 2.5px !important;
+}
+
+.mermaid-preview g.node.mermaid-link-hover > rect,
+.mermaid-preview g.node.mermaid-link-hover > polygon,
+.mermaid-preview g.node.mermaid-link-hover > circle,
+.mermaid-preview g.node.mermaid-link-hover > path {
+  fill: color-mix(in srgb, #2563eb 14%, transparent) !important;
+}
+
+.mermaid-drag-overlay {
+  /* fixed：避免给 .mermaid-preview-root 设 relative，以免放大按钮错位 */
+  position: fixed;
+  pointer-events: none;
+  z-index: 40;
+  overflow: visible;
+}
+
+.mermaid-drag-line {
+  stroke: #2563eb;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  stroke-linecap: round;
+  fill: none;
+  opacity: 0.9;
 }
 
 .mermaid-preview-root:has(.mermaid-edit-btn.is-active) .mermaid-preview {

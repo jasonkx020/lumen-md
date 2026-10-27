@@ -27,6 +27,24 @@ export function runMathExportSelfCheck(): string[] {
     errors.push(`fenced math: ${JSON.stringify(fenced)}`);
   }
 
+  const fencedLatex = collectMathSpans("```LaTeX\n\\sum_{i=1}^{n} i\n```\n");
+  if (
+    fencedLatex.length !== 1 ||
+    !fencedLatex[0]?.tex.includes("\\sum") ||
+    !fencedLatex[0]?.display
+  ) {
+    errors.push(`fenced LaTeX: ${JSON.stringify(fencedLatex)}`);
+  }
+
+  const fencedTex = collectMathSpans("```tex\na+b\n```\n");
+  if (
+    fencedTex.length !== 1 ||
+    fencedTex[0]?.tex.trim() !== "a+b" ||
+    !fencedTex[0]?.display
+  ) {
+    errors.push(`fenced tex: ${JSON.stringify(fencedTex)}`);
+  }
+
   const skipCode = collectMathSpans("```js\nconst x = '$not$'\n```\nreal $ok$\n");
   if (skipCode.length !== 1 || skipCode[0]?.tex !== "ok") {
     errors.push(`should skip code fence dollars: ${JSON.stringify(skipCode)}`);

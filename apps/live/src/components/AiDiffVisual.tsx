@@ -3,6 +3,10 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import mermaid from "mermaid";
 import { extractMermaidSource } from "../diagrams/normalizeMermaidMd";
+import {
+  extractFormulaLatex,
+  stripOuterFormulaFence,
+} from "../formula/normalizeFormulaMd";
 import { markdownToHtmlString } from "../api";
 
 export type DiffVisualKind = "mermaid" | "formula" | "markdown" | "plain";
@@ -19,32 +23,25 @@ function ensureMermaid() {
   mermaidReady = true;
 }
 
-function stripOuterLatexFence(text: string): string {
-  const t = text.trim().replace(/\r\n/g, "\n");
-  const fence = t.match(/^```\s*(?:latex|tex|math)[^\n]*\n([\s\S]*?)\n```\s*$/i);
-  return fence ? (fence[1] ?? "").trim() : t;
-}
-
-/** 几乎整段都是公式时走 KaTeX */
+/** 几乎整段都是公式时走 KaTeX（含中文 \\mathrm/\\text） */
 export function extractFormulaBlocks(text: string): string[] | null {
-  const t = stripOuterLatexFence(text);
+  const t = stripOuterFormulaFence(text);
   if (!t) return null;
   const display = [...t.matchAll(/\$\$([\s\S]+?)\$\$/g)].map((m) =>
     (m[1] ?? "").trim(),
   );
   if (display.length > 0) {
-    const rest = t.replace(/\$\$[\s\S]+?\$\$/g, "").replace(/\$[^$\n]+\$/g, "").trim();
-    if (rest.length < 24) return display;
-  }
-  // 单行裸公式或整段 LaTeX
-  if (
-    /^\\[a-zA-Z{]/.test(t) ||
-    (/[=\\^_{}]/.test(t) && !/[一-龥]/.test(t) && t.length < 400)
-  ) {
-    return [t];
+    const rest = t
+      .replace(/\$\$[\s\S]+?\$\$/g, "")
+      .replace(/\$[^$\n]+\$/g, "")
+      .trim();
+    if (rest.length < 48) return display.filter(Boolean);
   }
   const onlyInline = t.match(/^\$([^$\n]+)\$\s*$/);
-  if (onlyInline) return [(onlyInline[1] ?? "").trim()];
+  if (onlyInline) return [(onlyInline[1] ?? "").trim()].filter(Boolean);
+
+  const one = extractFormulaLatex(t);
+  if (one) return [one];
   return null;
 }
 

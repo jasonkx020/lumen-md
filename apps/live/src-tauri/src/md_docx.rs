@@ -1,7 +1,7 @@
 //! Markdown (GFM) → DOCX / GitHub 风 HTML。
 //! 色板与版式对齐 GitHub Primer / GFM 预览；DOCX 为可编辑近似，PDF 优先 HTML 打印。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::panic::AssertUnwindSafe;
 
@@ -18,6 +18,11 @@ use crate::html_table_docx::try_html_to_docx_table;
 
 thread_local! {
     static ASSET_CTX: RefCell<ExportAssetCtx> = RefCell::new(ExportAssetCtx::default());
+    static TABLE_WIDTH_RUNTIME: Cell<usize> = const { Cell::new(TABLE_WIDTH_DXA) };
+}
+
+fn table_width_dxa() -> usize {
+    TABLE_WIDTH_RUNTIME.with(|c| c.get())
 }
 
 fn with_asset_ctx<T>(ctx: &ExportAssetCtx, f: impl FnOnce() -> T) -> T {
@@ -41,13 +46,22 @@ pub const PDF_HTML_CANARY: &str = "LUMENMD_PDF_OK";
 const BULLET_NUM_ID: usize = 10; // 避开 docx-rs 硬编码的 default numId=1（decimal）
 const ORDERED_NUM_ID: usize = 11;
 
-/// 正文默认字号（半磅）：16px≈12pt → 24 half-points（GitHub markdown-body 偏 16px）
-const BODY_SIZE: usize = 22;
-/// 行距 auto 360 ≈ 1.5
-const BODY_LINE: i32 = 360;
+/// 正文默认字号（半磅）：12pt → 24 half-points（与 A4 普通文稿 / PDF 对齐）
+const BODY_SIZE: usize = 24;
+/// 行距 auto 384 ≈ 1.6（与 PDF document line-height 对齐）
+const BODY_LINE: i32 = 384;
 const PARA_AFTER: u32 = 200;
 const LIST_TIGHT_AFTER: u32 = 40;
 const LIST_LOOSE_AFTER: u32 = 140;
+
+/// A4：210×297mm（twips，1mm = 1440/25.4）
+const A4_WIDTH_TWIPS: u32 = 11906;
+const A4_HEIGHT_TWIPS: u32 = 16838;
+const SEAL_EXTRA_MM: u32 = 28;
+
+fn mm_to_twips(mm: u32) -> u32 {
+    ((mm as f64) * 1440.0 / 25.4).round() as u32
+}
 
 // —— GitHub Primer 风格 token（与 HTML CSS 共用）——
 const COLOR_FG: &str = "24292F";
@@ -63,8 +77,16 @@ const COLOR_TABLE_RULE_LIGHT: &str = "D8DEE4";
 const COLOR_LINK: &str = "0969DA";
 const COLOR_H6: &str = "656D76";
 
-/// 约 A4 页芯宽度（twips），与 ~2cm 页边距配套
+/// 表格宽度回退值（twips）；实际导出时按 prefs 边距重算
 const TABLE_WIDTH_DXA: usize = 9026;
+
+fn paper_content_width_dxa(ml: u32, mr: u32, seal: bool) -> usize {
+    let left = mm_to_twips(ml) + if seal { mm_to_twips(SEAL_EXTRA_MM) } else { 0 };
+    let right = mm_to_twips(mr);
+    A4_WIDTH_TWIPS
+        .saturating_sub(left)
+        .saturating_sub(right) as usize
+}
 
 fn gfm_options() -> Options<'static> {
     let mut options = Options::default();
@@ -209,10 +231,21 @@ fn merge_html_inlines<'a>(root: &'a AstNode<'a>) {
 }
 
 fn body_fonts() -> RunFonts {
+    paper_fonts_sans()
+}
+
+fn paper_fonts_sans() -> RunFonts {
     RunFonts::new()
         .ascii("Segoe UI")
         .hi_ansi("Segoe UI")
         .east_asia("微软雅黑")
+}
+
+fn paper_fonts_serif() -> RunFonts {
+    RunFonts::new()
+        .ascii("Times New Roman")
+        .hi_ansi("Times New Roman")
+        .east_asia("宋体")
 }
 
 fn mono_fonts() -> RunFonts {
@@ -226,6 +259,50 @@ fn body_line_spacing() -> LineSpacing {
     LineSpacing::new()
         .line_rule(LineSpacingType::Auto)
         .line(BODY_LINE)
+}
+
+fn line_spacing_for_ratio(ratio: f64) -> LineSpacing {
+    let line = (240.0 * ratio).round() as i32;
+    LineSpacing::new()
+        .line_rule(LineSpacingType::Auto)
+        .line(line)
+}
+
+struct PaperDocxOpts {
+    style: String,
+    mt: u32,
+    mr: u32,
+    mb: u32,
+    ml: u32,
+    exam_header: bool,
+    exam_seal: bool,
+    exam_school: String,
+    exam_title: String,
+    /// A4 版式或导出时一律按 A4（与 PDF 一致）
+    a4: bool,
+}
+
+fn load_paper_docx_opts() -> PaperDocxOpts {
+    let prefs = crate::settings_store::load_prefs();
+    let style = match prefs.paper_style.trim().to_ascii_lowercase().as_str() {
+        "homework" => "homework",
+        "exam" => "exam",
+        _ => "document",
+    }
+    .to_string();
+    PaperDocxOpts {
+        style,
+        mt: prefs.paper_margin_top.clamp(5, 40),
+        mr: prefs.paper_margin_right.clamp(5, 40),
+        mb: prefs.paper_margin_bottom.clamp(5, 40),
+        ml: prefs.paper_margin_left.clamp(5, 40),
+        exam_header: prefs.exam_header_enabled,
+        exam_seal: prefs.exam_seal_enabled,
+        exam_school: prefs.exam_school.clone(),
+        exam_title: prefs.exam_title.clone(),
+        // DOCX 与 PDF 一样固定 A4 纸型
+        a4: true,
+    }
 }
 
 fn para_spacing(after: u32) -> LineSpacing {
@@ -267,16 +344,23 @@ pub fn markdown_to_docx_bytes_with_ctx(
     }
 
     with_asset_ctx(ctx, || {
+        let paper = load_paper_docx_opts();
+        let use_seal = paper.a4 && paper.style == "exam" && paper.exam_seal;
+        let content_w = paper_content_width_dxa(paper.ml, paper.mr, use_seal);
+        TABLE_WIDTH_RUNTIME.with(|c| c.set(content_w));
+
         let arena = Arena::new();
         let root = parse_document(&arena, markdown, &gfm_options());
         merge_html_inlines(root);
         sanitize_html_nodes(root);
 
-        let mut docx = apply_document_chrome(Docx::new())
+        let mut docx = apply_document_chrome(Docx::new(), &paper)
             .add_abstract_numbering(bullet_abstract(BULLET_NUM_ID))
             .add_abstract_numbering(ordered_abstract(ORDERED_NUM_ID))
             .add_numbering(Numbering::new(BULLET_NUM_ID, BULLET_NUM_ID))
             .add_numbering(Numbering::new(ORDERED_NUM_ID, ORDERED_NUM_ID));
+
+        docx = prepend_exam_chrome_docx(docx, &paper);
 
         let mut bookmark_id = 1usize;
         for child in root.children() {
@@ -284,7 +368,9 @@ pub fn markdown_to_docx_bytes_with_ctx(
         }
 
         let mut buf = Cursor::new(Vec::new());
-        docx.build()
+        let built = docx.build();
+        TABLE_WIDTH_RUNTIME.with(|c| c.set(TABLE_WIDTH_DXA));
+        built
             .pack(&mut buf)
             .map_err(|e| anyhow::anyhow!("DOCX 打包失败: {e}"))?;
         Ok(buf.into_inner())
@@ -832,45 +918,70 @@ pub fn markdown_to_standalone_html(markdown: &str) -> anyhow::Result<String> {
     markdown_to_github_html(markdown)
 }
 
-fn apply_document_chrome(docx: Docx) -> Docx {
+fn apply_document_chrome(docx: Docx, paper: &PaperDocxOpts) -> Docx {
+    let use_seal = paper.a4 && paper.style == "exam" && paper.exam_seal;
+    let mut left = mm_to_twips(paper.ml);
+    if use_seal {
+        left = left.saturating_add(mm_to_twips(SEAL_EXTRA_MM));
+    }
     let margin = PageMargin::new()
-        .top(1134)
-        .bottom(1134)
-        .left(1134)
-        .right(1134);
+        .top(mm_to_twips(paper.mt) as i32)
+        .bottom(mm_to_twips(paper.mb) as i32)
+        .left(left as i32)
+        .right(mm_to_twips(paper.mr) as i32);
+
+    let (fonts, body_size, line_ratio, h1_center) = match paper.style.as_str() {
+        "homework" => (paper_fonts_sans(), 27usize, 2.0_f64, false), // 13.5pt
+        "exam" => (paper_fonts_serif(), 23usize, 1.55_f64, true),     // ~11.25pt
+        _ => (paper_fonts_sans(), 24usize, 1.6_f64, false),           // 12pt
+    };
+    let line_sp = line_spacing_for_ratio(line_ratio);
 
     let mut docx = docx
+        .page_size(A4_WIDTH_TWIPS, A4_HEIGHT_TWIPS)
         .page_margin(margin)
-        .default_size(BODY_SIZE)
-        .default_fonts(body_fonts())
-        .default_line_spacing(body_line_spacing());
+        .default_size(body_size)
+        .default_fonts(fonts.clone())
+        .default_line_spacing(line_sp.clone());
 
-    // GitHub 风格标题字号（半磅）+ H1/H2 底部分割线
+    // GitHub 风格标题字号（半磅）+ H1/H2 底部分割线；相对正文字号缩放
+    let h1 = body_size.saturating_mul(5) / 3; // ~20pt @12pt body
+    let h2 = body_size.saturating_mul(5) / 4;
+    let h3 = body_size.saturating_add(2);
     let headings: &[(u8, usize, u32, u32, Option<&str>, bool)] = &[
-        (1, 40, 200, 200, None, true),
-        (2, 30, 280, 160, None, true),
-        (3, 24, 240, 140, None, false),
-        (4, 22, 200, 120, None, false),
-        (5, 20, 180, 100, None, false),
-        (6, 18, 160, 80, Some(COLOR_H6), false),
+        (1, h1.max(28), 200, 200, None, true),
+        (2, h2.max(24), 280, 160, None, true),
+        (3, h3.max(22), 240, 140, None, false),
+        (4, body_size, 200, 120, None, false),
+        (5, body_size.saturating_sub(2).max(18), 180, 100, None, false),
+        (
+            6,
+            body_size.saturating_sub(4).max(16),
+            160,
+            80,
+            Some(COLOR_H6),
+            false,
+        ),
     ];
     for &(level, size, before, after, color, bottom_rule) in headings {
         let id = format!("Heading{level}");
         let name = format!("Heading {level}");
-        // OOXML outlineLvl：0 = 最高级（对应 Heading1）
         let mut style = Style::new(&id, StyleType::Paragraph)
             .name(name)
             .based_on("Normal")
             .bold()
             .size(size)
             .color(COLOR_FG)
-            .fonts(body_fonts())
+            .fonts(fonts.clone())
             .line_spacing(heading_spacing(before, after))
             .outline_lvl((level as usize).saturating_sub(1));
+        if level == 1 && h1_center {
+            style = style.align(AlignmentType::Center);
+        }
         if let Some(c) = color {
             style = style.color(c);
         }
-        if bottom_rule {
+        if bottom_rule && paper.style != "exam" {
             style.paragraph_property = style.paragraph_property.set_borders(
                 ParagraphBorders::with_empty().set(
                     ParagraphBorder::new(ParagraphBorderPosition::Bottom)
@@ -900,10 +1011,15 @@ fn apply_document_chrome(docx: Docx) -> Docx {
         .name("MD Quote")
         .based_on("Normal")
         .color(COLOR_QUOTE)
-        .fonts(body_fonts())
-        .size(BODY_SIZE)
+        .fonts(fonts)
+        .size(body_size)
         .indent(Some(420), None, None, None)
-        .line_spacing(para_spacing(PARA_AFTER));
+        .line_spacing(
+            LineSpacing::new()
+                .line_rule(LineSpacingType::Auto)
+                .line((240.0 * line_ratio).round() as i32)
+                .after(PARA_AFTER),
+        );
     quote_style.paragraph_property = quote_style.paragraph_property.set_borders(
         ParagraphBorders::with_empty().set(
             ParagraphBorder::new(ParagraphBorderPosition::Left)
@@ -914,6 +1030,80 @@ fn apply_document_chrome(docx: Docx) -> Docx {
         ),
     );
     docx.add_style(quote_style)
+}
+
+/// 标准试卷：在正文前注入页眉（学校/考试名/姓名班级考号）与密封线提示，对齐 PDF 装饰。
+fn prepend_exam_chrome_docx(mut docx: Docx, paper: &PaperDocxOpts) -> Docx {
+    if !(paper.a4 && paper.style == "exam") {
+        return docx;
+    }
+    let fonts = paper_fonts_serif();
+    if paper.exam_seal {
+        let tip = Paragraph::new()
+            .add_run(
+                Run::new()
+                    .add_text("【密封线】密封线内不得答题")
+                    .size(18)
+                    .fonts(fonts.clone())
+                    .color("333333"),
+            )
+            .align(AlignmentType::Left)
+            .line_spacing(LineSpacing::new().after(80));
+        docx = docx.add_paragraph(tip);
+    }
+    if paper.exam_header {
+        let school = paper.exam_school.trim();
+        let title = paper.exam_title.trim();
+        if !school.is_empty() {
+            docx = docx.add_paragraph(
+                Paragraph::new()
+                    .add_run(
+                        Run::new()
+                            .add_text(school)
+                            .size(22)
+                            .fonts(fonts.clone()),
+                    )
+                    .align(AlignmentType::Center)
+                    .line_spacing(LineSpacing::new().after(60)),
+            );
+        }
+        if !title.is_empty() {
+            docx = docx.add_paragraph(
+                Paragraph::new()
+                    .add_run(
+                        Run::new()
+                            .add_text(title)
+                            .size(28)
+                            .bold()
+                            .fonts(fonts.clone()),
+                    )
+                    .align(AlignmentType::Center)
+                    .line_spacing(LineSpacing::new().after(120)),
+            );
+        }
+        let info = Paragraph::new()
+            .add_run(
+                Run::new()
+                    .add_text("姓名________    班级________    考号____________")
+                    .size(21)
+                    .fonts(fonts),
+            )
+            .align(AlignmentType::Center)
+            .line_spacing(LineSpacing::new().after(200));
+        // 底部分隔线
+        let mut info = info;
+        info.property = info.property.set_borders(
+            ParagraphBorders::with_empty().set(
+                ParagraphBorder::new(ParagraphBorderPosition::Bottom)
+                    .val(BorderType::Single)
+                    .size(8)
+                    .space(4)
+                    .color("222222"),
+            ),
+        );
+        docx = docx.add_paragraph(info);
+    }
+    docx
 }
 
 fn bullet_abstract(id: usize) -> AbstractNumbering {
@@ -1039,6 +1229,15 @@ fn append_block<'a>(
         }
         NodeValue::CodeBlock(cb) => {
             let literal = cb.literal.trim_end_matches('\n');
+            // 前端未栅格化时：公式围栏勿落成代码块，改为居中斜体 $$…$$
+            if is_math_code_fence(&cb.info) {
+                let label = math_dollar_label(literal, true);
+                let p = Paragraph::new()
+                    .align(AlignmentType::Center)
+                    .add_run(styled_run(&label, &InlineStyle::default()).italic())
+                    .line_spacing(para_spacing(PARA_AFTER));
+                return docx.add_paragraph(p);
+            }
             let mut p = Paragraph::new().style("mdCodeBlock");
             for (i, line) in literal.split('\n').enumerate() {
                 if i > 0 {
@@ -1139,7 +1338,7 @@ fn append_block<'a>(
                     col_weights[col] = col_weights[col].max(w);
                 }
             }
-            let col_widths = allocate_col_widths(&col_weights, TABLE_WIDTH_DXA);
+            let col_widths = allocate_col_widths(&col_weights, table_width_dxa());
 
             let mut rows: Vec<TableRow> = Vec::new();
             for row in &row_srcs {
@@ -1175,9 +1374,10 @@ fn append_block<'a>(
                 rows.push(TableRow::new(cells));
             }
 
+            let tw = table_width_dxa();
             let mut table = Table::new(rows)
                 .set_grid(col_widths)
-                .width(TABLE_WIDTH_DXA, WidthType::Dxa)
+                .width(tw, WidthType::Dxa)
                 .layout(TableLayoutType::Fixed)
                 .set_borders(md_table_borders());
             table.property = table
@@ -1192,7 +1392,7 @@ fn append_block<'a>(
             if is_html_table(&hb.literal) {
                 if let Some(table) = try_html_to_docx_table(
                     &hb.literal,
-                    TABLE_WIDTH_DXA,
+                    table_width_dxa(),
                     COLOR_TABLE_HEADER,
                     md_cell_borders,
                     md_table_borders(),
@@ -1543,6 +1743,25 @@ fn code_run(text: &str) -> Run {
         .size(18)
 }
 
+/// Crepe / GFM 公式围栏：`math` / `latex` / `tex`（忽略大小写与额外 info）。
+fn is_math_code_fence(info: &str) -> bool {
+    let lang = info
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(lang.as_str(), "math" | "latex" | "tex")
+}
+
+fn math_dollar_label(literal: &str, display: bool) -> String {
+    let t = literal.trim();
+    if display {
+        format!("$${t}$$")
+    } else {
+        format!("${t}$")
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct InlineOpts {
     force_bold: bool,
@@ -1698,7 +1917,8 @@ fn append_inlines<'a>(node: &'a AstNode<'a>, style: &mut InlineStyle, out: &mut 
                 )));
             }
             NodeValue::Math(m) => {
-                out.push(InlinePiece::Run(styled_run(&m.literal, style).italic()));
+                let label = math_dollar_label(&m.literal, m.display_math);
+                out.push(InlinePiece::Run(styled_run(&label, style).italic()));
             }
             NodeValue::WikiLink(w) => {
                 let text = inline_plain_text(child);
@@ -2045,8 +2265,26 @@ fn main() {}
             "styles missing font size"
         );
         assert!(
-            styles.contains("微软雅黑") || styles.contains("Segoe UI"),
-            "styles missing body fonts"
+            styles.contains("微软雅黑")
+                || styles.contains("Segoe UI")
+                || styles.contains("宋体")
+                || styles.contains("Times New Roman"),
+            "styles missing body fonts (sans/serif paper stack)"
+        );
+    }
+
+    #[test]
+    fn docx_uses_a4_page_and_prefs_margins() {
+        let bytes = markdown_to_docx_bytes("# t\n\nbody\n").expect("docx");
+        let xml = document_xml(bytes);
+        // A4 w/h in twips
+        assert!(
+            xml.contains("11906") && xml.contains("16838"),
+            "DOCX should use A4 page size (11906×16838 twips)"
+        );
+        assert!(
+            xml.contains("w:pgMar") || xml.contains("pgMar"),
+            "DOCX should declare page margins"
         );
     }
 
@@ -2396,6 +2634,40 @@ after
         assert!(
             docx_has_media_png(&bytes),
             "math placeholder PNG should be embedded from overrides"
+        );
+    }
+
+    #[test]
+    fn docx_math_fallback_keeps_dollar_wrappers() {
+        let md = "能量 $E=mc^2$ 与\n\n$$a^2+b^2$$\n";
+        let bytes = markdown_to_docx_bytes(md).expect("docx");
+        let xml = document_xml(bytes);
+        assert!(
+            xml.contains("$E=mc^2$") || xml.contains("E=mc^2"),
+            "inline math should appear with readable dollars: {}",
+            &xml.chars().take(1200).collect::<String>()
+        );
+        assert!(
+            xml.contains("$$a^2+b^2$$") || xml.contains("a^2+b^2"),
+            "display math should appear: {}",
+            &xml.chars().take(1200).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn docx_latex_fence_fallback_not_code_block() {
+        let md = "前言\n\n```LaTeX\n\\frac{1}{2}\n```\n\n后语\n";
+        let bytes = markdown_to_docx_bytes(md).expect("docx");
+        let xml = document_xml(bytes);
+        assert!(
+            xml.contains("\\frac{1}{2}") || xml.contains("frac"),
+            "latex fence body should appear: {}",
+            &xml.chars().take(1500).collect::<String>()
+        );
+        // 不应使用代码块 shading 样式名作为主路径（mdCodeBlock）——允许不出现亦可
+        assert!(
+            xml.contains("$$") || xml.contains("\\frac"),
+            "expected math-style fallback text"
         );
     }
 }

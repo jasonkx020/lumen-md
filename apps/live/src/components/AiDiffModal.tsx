@@ -6,8 +6,12 @@ export type AiDiffPreview = {
   before: string;
   after: string;
   replaceSelection: boolean;
-  /** insert_at_cursor | replace_document | replace_selection */
-  writeMode?: "replace_selection" | "replace_document" | "insert_at_cursor";
+  /** insert_at_cursor | insert_after_selection | replace_document | replace_selection */
+  writeMode?:
+    | "replace_selection"
+    | "replace_document"
+    | "insert_at_cursor"
+    | "insert_after_selection";
   warn?: string;
   /** Live 编辑器选区位置（对比弹窗会丢掉选区） */
   from?: number;
@@ -43,17 +47,21 @@ export function AiDiffModal({ preview, onAccept, onDiscard }: Props) {
   if (!preview) return null;
 
   const scopeHint =
-    preview.writeMode === "insert_at_cursor"
-      ? "插入到光标处"
-      : preview.replaceSelection || preview.writeMode === "replace_selection"
-        ? "仅替换选中内容"
-        : "替换整篇文档";
+    preview.writeMode === "insert_after_selection"
+      ? "插入到选区后（保留原文）"
+      : preview.writeMode === "insert_at_cursor"
+        ? "插入到光标处"
+        : preview.replaceSelection || preview.writeMode === "replace_selection"
+          ? "仅替换选中内容"
+          : "替换整篇文档";
 
   const hasInputImages = (preview.inputImages?.length ?? 0) > 0;
   // 插入类「处理前」多为提示语；替换类两侧都尽量可视化
   // 识图：左侧展示上传图，不把文档 Markdown 当可视化（避免冒出文档内图片）
   const beforeDefaultVisual =
-    !hasInputImages && preview.writeMode !== "insert_at_cursor";
+    !hasInputImages &&
+    preview.writeMode !== "insert_at_cursor" &&
+    preview.writeMode !== "insert_after_selection";
 
   return (
     <div className="ai-diff-dialog" role="presentation" onClick={onDiscard}>
