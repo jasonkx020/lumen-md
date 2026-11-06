@@ -1,3 +1,5 @@
+import { docKindFromPath, type DocKind } from "./docKind";
+
 export type EditorTab = {
   id: string;
   key: string;
@@ -7,6 +9,7 @@ export type EditorTab = {
   dirty: boolean;
   relPath?: string;
   absPath?: string;
+  docKind?: DocKind;
 };
 
 export function fileTitle(path: string): string {
@@ -39,6 +42,7 @@ export function createUntitledTab(content = ""): EditorTab {
     content,
     savedContent: content,
     dirty: content.length > 0,
+    docKind: "markdown",
   };
 }
 
@@ -56,6 +60,7 @@ export function createWorkspaceTab(
     savedContent: content,
     dirty: false,
     relPath: norm,
+    docKind: docKindFromPath(norm),
   };
 }
 
@@ -72,5 +77,6 @@ export function createStandaloneTab(
     savedContent: content,
     dirty: false,
     absPath: abs,
+    docKind: docKindFromPath(abs),
   };
 }

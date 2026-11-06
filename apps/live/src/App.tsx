@@ -9,7 +9,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
-  fsCreate,
   fsRead,
   fsWrite,
   fsWriteAbs,
@@ -63,6 +62,7 @@ import { TabBar } from "./components/TabBar";
 import { ExportProgress } from "./components/ExportProgress";
 import { FindReplace } from "./components/FindReplace";
 import { WorkspaceSearchModal } from "./components/WorkspaceSearchModal";
+import { StructuredDocEditor } from "./components/StructuredDocEditor";
 import { runExport } from "./export/runExport";
 import { useSimulatedProgress } from "./export/useSimulatedProgress";
 import { handleDocLinkClick } from "./links/resolveLink";
@@ -86,6 +86,19 @@ import {
   type EditorTab,
   wsKey,
 } from "./tabs";
+import {
+  draftToTab,
+  loadDrafts,
+  persistUntitledFromTabs,
+  removeDraft,
+} from "./drafts/draftStore";
+import { TEXT_DIALOG_FILTERS } from "./textExts";
+import {
+  docKindFromPath,
+  tabDocKind,
+  usesCrepe,
+} from "./docKind";
+import { getEditorModule } from "./editors/registry";
 import "./App.css";
 
 const WELCOME = `# Lumen MD Live
@@ -103,15 +116,6 @@ const WELCOME = `# Lumen MD Live
 - \`Ctrl/⌘+S\` 保存 · \`Ctrl/⌘+/\` 切换源代码 · \`Ctrl/⌘+W\` 关闭标签
 `;
 
-function isMdPath(p: string) {
-  const lower = p.toLowerCase();
-  return (
-    lower.endsWith(".md") ||
-    lower.endsWith(".markdown") ||
-    lower.endsWith(".txt")
-  );
-}
-
 function bootstrapTab(): EditorTab {
   const t = createUntitledTab(WELCOME);
   t.title = "欢迎";
@@ -128,6 +132,8 @@ export default function App() {
   const tabsRef = useRef<EditorTab[]>([]);
   const activeIdRef = useRef<string | null>(null);
   const handleDropPathRef = useRef<(path: string) => Promise<void>>(async () => {});
+  const draftPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftsHydrated = useRef(false);
 
   const initial = bootstrapTab();
   const [tabs, setTabs] = useState<EditorTab[]>([initial]);
@@ -245,6 +251,65 @@ export default function App() {
       .catch(() => {});
   }, [applySettingsView]);
 
+  /** 启动时恢复未命名草稿，避免上次未保存内容丢失 */
+  useEffect(() => {
+    if (draftsHydrated.current) return;
+    draftsHydrated.current = true;
+    const drafts = loadDrafts();
+    if (drafts.length === 0) return;
+    const restored = drafts.map(draftToTab);
+    tabsRef.current = restored;
+    setTabs(restored);
+    const first = restored[0]!;
+    setActiveId(first.id);
+    activeIdRef.current = first.id;
+    markdownRef.current = first.content;
+    setMarkdown(first.content);
+    setHtmlAssetDocAbs(null);
+    setStatus(`已恢复 ${restored.length} 个未保存草稿`);
+    // Crepe 可能已用欢迎页初始化，下一帧写回草稿内容
+    requestAnimationFrame(() => {
+      editorRef.current?.setMarkdown(first.content);
+    });
+  }, []);
+
+  const schedulePersistDrafts = useCallback(() => {
+    if (draftPersistTimer.current) clearTimeout(draftPersistTimer.current);
+    draftPersistTimer.current = setTimeout(() => {
+      draftPersistTimer.current = null;
+      persistUntitledFromTabs(tabsRef.current);
+    }, 400);
+  }, []);
+
+  useEffect(() => {
+    const flushNow = () => {
+      if (draftPersistTimer.current) {
+        clearTimeout(draftPersistTimer.current);
+        draftPersistTimer.current = null;
+      }
+      const id = activeIdRef.current;
+      const md =
+        editorRef.current?.getMarkdown() ?? markdownRef.current;
+      if (id) {
+        tabsRef.current = tabsRef.current.map((t) =>
+          t.id === id
+            ? { ...t, content: md, dirty: md !== t.savedContent }
+            : t,
+        );
+      }
+      persistUntitledFromTabs(tabsRef.current);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flushNow();
+    };
+    window.addEventListener("beforeunload", flushNow);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("beforeunload", flushNow);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
   const applyTheme = useCallback((id: ThemeId) => {
     setTheme(id);
     void settingsSet({ theme: id }).catch(() => {
@@ -256,6 +321,10 @@ export default function App() {
   const dirty = activeTab?.dirty ?? false;
   const title = activeTab?.title ?? "未命名";
   const activeRel = activeTab?.relPath ?? null;
+  const activeDocKind = activeTab ? tabDocKind(activeTab) : "markdown";
+  const activeEditorMod = activeTab
+    ? getEditorModule(activeTab)
+    : getEditorModule("markdown");
   const resolveDocAbs = useCallback(
     (tab: { absPath?: string | null; relPath?: string | null } | null | undefined) => {
       if (!tab) return null;
@@ -272,10 +341,13 @@ export default function App() {
   );
   const activeDocAbs = resolveDocAbs(activeTab);
   const wordStats = countWords(markdown);
-  const frontMatter = splitFrontMatter(markdown);
+  const frontMatter =
+    usesCrepe(activeDocKind) ? splitFrontMatter(markdown) : null;
 
   const currentEditorMarkdown = useCallback(() => {
-    if (sourceMode) return markdownRef.current;
+    const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    const kind = tab ? tabDocKind(tab) : "markdown";
+    if (sourceMode || !usesCrepe(kind)) return markdownRef.current;
     return editorRef.current?.getMarkdown() ?? markdownRef.current;
   }, [sourceMode]);
 
@@ -294,34 +366,47 @@ export default function App() {
     tabsRef.current = next;
     setTabs(next);
     setMarkdown(md);
+    schedulePersistDrafts();
     return next;
-  }, [currentEditorMarkdown]);
+  }, [currentEditorMarkdown, schedulePersistDrafts]);
 
   const loadTabIntoEditor = useCallback(
     (tab: EditorTab) => {
-      // 必须在 setMarkdown 前同步文档路径，否则 HTML 相对图按空路径解析会裂图
-      setHtmlAssetDocAbs(resolveDocAbs(tab));
+      const kind = tabDocKind(tab);
+      // 仅 Markdown 需要同步 HTML 相对资源路径；结构化/纯文本不进 Crepe
+      setHtmlAssetDocAbs(usesCrepe(kind) ? resolveDocAbs(tab) : null);
       markdownRef.current = tab.content;
       setMarkdown(tab.content);
-      editorRef.current?.setMarkdown(tab.content);
+      if (usesCrepe(kind)) {
+        editorRef.current?.setMarkdown(tab.content);
+        setSourceMode(false);
+      } else if (kind === "plain") {
+        setSourceMode(true);
+      } else {
+        setSourceMode(false);
+      }
     },
     [resolveDocAbs],
   );
 
-  const markDirtyFrom = useCallback((md: string) => {
-    markdownRef.current = md;
-    setMarkdown(md);
-    const id = activeIdRef.current;
-    setTabs((prev) => {
-      const next = prev.map((t) =>
-        t.id === id
-          ? { ...t, content: md, dirty: md !== t.savedContent }
-          : t,
-      );
-      tabsRef.current = next;
-      return next;
-    });
-  }, []);
+  const markDirtyFrom = useCallback(
+    (md: string) => {
+      markdownRef.current = md;
+      setMarkdown(md);
+      const id = activeIdRef.current;
+      setTabs((prev) => {
+        const next = prev.map((t) =>
+          t.id === id
+            ? { ...t, content: md, dirty: md !== t.savedContent }
+            : t,
+        );
+        tabsRef.current = next;
+        return next;
+      });
+      schedulePersistDrafts();
+    },
+    [schedulePersistDrafts],
+  );
 
   const applyMarkdownReplace = useCallback(
     (next: string) => {
@@ -780,12 +865,17 @@ export default function App() {
         const ok = window.confirm(`「${tab.title}」尚未保存，确定关闭？`);
         if (!ok) return;
       }
+      const wasUntitled = !tab.relPath && !tab.absPath;
       let next = tabsRef.current.filter((t) => t.id !== id);
       if (next.length === 0) {
         next = [bootstrapTab()];
       }
       tabsRef.current = next;
       setTabs(next);
+      if (wasUntitled) {
+        removeDraft(id);
+        persistUntitledFromTabs(next);
+      }
       if (activeIdRef.current === id) {
         const fallback = next[next.length - 1]!;
         setActiveId(fallback.id);
@@ -846,9 +936,9 @@ export default function App() {
         return;
       }
 
-      // untitled → 另存为
+      // untitled → 另存为（首次才选目录）
       const selected = await save({
-        filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+        filters: [...TEXT_DIALOG_FILTERS],
         defaultPath: `${tab.title === "欢迎" ? "untitled" : tab.title}.md`,
       });
       await restoreUiAfterNativeDialog();
@@ -863,19 +953,23 @@ export default function App() {
         dirty: false,
         absPath: abs,
         relPath: undefined,
+        docKind: docKindFromPath(abs),
       };
       const next = tabsRef.current.map((t) =>
         t.id === tab.id ? upgraded : t,
       );
       tabsRef.current = next;
       setTabs(next);
+      removeDraft(tab.id);
+      persistUntitledFromTabs(next);
+      loadTabIntoEditor(upgraded);
       setStatus(`已保存 ${upgraded.title}`);
       await restoreUiAfterNativeDialog();
     } catch (e) {
       await restoreUiAfterNativeDialog();
       setStatus(`保存失败: ${e}`);
     }
-  }, [flushActiveToTabs, restoreUiAfterNativeDialog]);
+  }, [flushActiveToTabs, loadTabIntoEditor, restoreUiAfterNativeDialog]);
 
   const openFolderDialog = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -893,7 +987,7 @@ export default function App() {
   const openFileDialog = useCallback(async () => {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+      filters: [...TEXT_DIALOG_FILTERS],
     });
     if (!selected || Array.isArray(selected)) return;
     try {
@@ -927,28 +1021,12 @@ export default function App() {
     [focusTab, openOrFocusTab],
   );
 
-  const newFile = useCallback(async () => {
-    if (workspaceRoot) {
-      const name = window.prompt("文件名（相对路径，默认 .md）", "untitled.md");
-      if (!name) return;
-      let rel = name.replace(/\\/g, "/").trim();
-      // 新建标签默认 CommonMark/GFM（.md），不默认 .html
-      if (!/\.(md|markdown|txt)$/i.test(rel)) {
-        rel = `${rel.replace(/\.(html?|htm)$/i, "")}.md`;
-      }
-      try {
-        await fsCreate(rel);
-        setTreeKey((k) => k + 1);
-        await openWorkspaceFile(rel);
-        setStatus(`已新建 Markdown：${rel}`);
-      } catch (e) {
-        setStatus(`新建失败: ${e}`);
-      }
-      return;
-    }
-    openOrFocusTab(createUntitledTab(""));
-    setStatus("已新建未命名 Markdown");
-  }, [workspaceRoot, openOrFocusTab, openWorkspaceFile]);
+  const newFile = useCallback(() => {
+    const tab = createUntitledTab("");
+    openOrFocusTab(tab);
+    persistUntitledFromTabs(tabsRef.current);
+    setStatus("已新建未命名 Markdown（保存时再选择目录）");
+  }, [openOrFocusTab]);
 
   const jumpOutline = useCallback(
     (heading: OutlineHeading) => {
@@ -1033,7 +1111,8 @@ export default function App() {
           setStatus(`已插入图片 ${rel}`);
           return;
         }
-        if (isMdPath(path)) {
+        // 非图片：优先当文件按文本打开；失败再当文件夹开工作区
+        try {
           const res = await openAbsoluteFile(path);
           if (res.mode === "workspace" && res.rel_path) {
             openOrFocusTab(createWorkspaceTab(res.rel_path, res.content));
@@ -1041,12 +1120,23 @@ export default function App() {
             openOrFocusTab(createStandaloneTab(res.abs_path, res.content));
           }
           setStatus(`已打开 ${path.split(/[/\\]/).pop() ?? path}`);
-        } else {
-          const root = await openWorkspace(path);
-          setWorkspaceRoot(root);
-          setTreeKey((k) => k + 1);
-          setStatus(`工作区: ${root}`);
+          return;
+        } catch (fileErr) {
+          const msg = String(fileErr);
+          // 二进制等明确失败：不再误开工作区
+          if (
+            msg.includes("二进制") ||
+            msg.includes("不是文件") ||
+            msg.includes("软上限")
+          ) {
+            setStatus(`无法按文本打开: ${fileErr}`);
+            return;
+          }
         }
+        const root = await openWorkspace(path);
+        setWorkspaceRoot(root);
+        setTreeKey((k) => k + 1);
+        setStatus(`工作区: ${root}`);
       } catch (e) {
         setStatus(`拖放失败: ${e}`);
       }
@@ -1071,7 +1161,8 @@ export default function App() {
       for (const p of paths) {
         if (disposed) return;
         const cleaned = p.trim().replace(/^["']|["']$/g, "");
-        if (!isMdPath(cleaned)) continue;
+        if (!cleaned) continue;
+        // 非目录路径一律尝试按文本打开（未知后缀亦可；二进制由后端拒绝）
         await handleDropPathRef.current(cleaned);
       }
     };
@@ -1105,6 +1196,24 @@ export default function App() {
   }, []);
 
   const toggleSourceMode = useCallback(() => {
+    const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    const mod = tab ? getEditorModule(tab) : getEditorModule("markdown");
+    if (!mod.allowToggleSource) {
+      setSourceMode(true);
+      setStatus("纯文本即为源码所见即所得");
+      return;
+    }
+    if (mod.live === "structured") {
+      setSourceMode((prev) => {
+        if (!prev) {
+          setStatus(`源代码模式 — ${mod.structuredKind?.toUpperCase() ?? mod.id}`);
+          return true;
+        }
+        setStatus("结构化 Live 编辑");
+        return false;
+      });
+      return;
+    }
     setSourceMode((prev) => {
       if (!prev) {
         const md = editorRef.current?.getMarkdown() ?? markdownRef.current;
@@ -1124,6 +1233,11 @@ export default function App() {
   }, []);
 
   const doExport = useCallback(async (kind: "pdf" | "docx" | "html") => {
+    const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (tab && !usesCrepe(tabDocKind(tab))) {
+      setStatus("导出仅支持 Markdown 文档");
+      return;
+    }
     try {
       const md = currentEditorMarkdown();
       markdownRef.current = md;
@@ -1174,7 +1288,7 @@ export default function App() {
     const md = tab.content;
     try {
       const selected = await save({
-        filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+        filters: [...TEXT_DIALOG_FILTERS],
         defaultPath: `${tab.title === "欢迎" ? "untitled" : tab.title}.md`,
       });
       await restoreUiAfterNativeDialog();
@@ -1189,19 +1303,23 @@ export default function App() {
         dirty: false,
         absPath: abs,
         relPath: undefined,
+        docKind: docKindFromPath(abs),
       };
       const next = tabsRef.current.map((t) =>
         t.id === tab.id ? upgraded : t,
       );
       tabsRef.current = next;
       setTabs(next);
+      removeDraft(tab.id);
+      persistUntitledFromTabs(next);
+      loadTabIntoEditor(upgraded);
       setStatus(`已另存为 ${upgraded.title}`);
       await restoreUiAfterNativeDialog();
     } catch (e) {
       await restoreUiAfterNativeDialog();
       setStatus(`另存为失败: ${e}`);
     }
-  }, [flushActiveToTabs, restoreUiAfterNativeDialog]);
+  }, [flushActiveToTabs, loadTabIntoEditor, restoreUiAfterNativeDialog]);
 
   const jumpFindHit = useCallback(
     (index: number, len: number) => {
@@ -1566,6 +1684,9 @@ export default function App() {
         activeId={activeId}
         onSelect={focusTab}
         onClose={closeTab}
+        pathTitle={(tab) =>
+          resolveDocAbs(tab) ?? tab.relPath ?? tab.title
+        }
       />
       <div className="main-row">
         {showSidebar ? (
@@ -1592,78 +1713,99 @@ export default function App() {
               ) : null}
             </div>
           ) : null}
-          <div
-            className={
-              (sourceMode ? "editor-layer is-hidden" : "editor-layer") +
-              (paperLayout === "a4" ? " is-paper-a4" : "")
-            }
-          >
+          {activeEditorMod.live === "crepe" ? (
             <div
               className={
-                "paper-sheet" +
-                ` is-style-${paperStyle}` +
-                (paperLayout === "a4" ? " is-paper-a4" : "") +
-                (paperLayout === "a4" &&
-                paperStyle === "exam" &&
-                examSealEnabled
-                  ? " has-exam-seal"
-                  : "")
-              }
-              style={
-                paperLayout === "a4"
-                  ? ({
-                      ["--paper-mt"]: `${paperMarginTop}mm`,
-                      ["--paper-mr"]: `${paperMarginRight}mm`,
-                      ["--paper-mb"]: `${paperMarginBottom}mm`,
-                      ["--paper-ml"]: `${paperMarginLeft}mm`,
-                    } as CSSProperties)
-                  : undefined
+                (sourceMode ? "editor-layer is-hidden" : "editor-layer") +
+                (paperLayout === "a4" ? " is-paper-a4" : "")
               }
             >
-              {paperLayout === "a4" && paperStyle === "exam" ? (
-                <ExamPaperChrome
-                  school={examSchool}
-                  title={examTitle}
-                  headerEnabled={examHeaderEnabled}
-                  sealEnabled={examSealEnabled}
-                  onSchoolChange={(v) => {
-                    setExamSchool(v);
-                    void settingsSet({ examSchool: v }).catch(() => {});
-                  }}
-                  onTitleChange={(v) => {
-                    setExamTitle(v);
-                    void settingsSet({ examTitle: v }).catch(() => {});
-                  }}
+              <div
+                className={
+                  "paper-sheet" +
+                  ` is-style-${paperStyle}` +
+                  (paperLayout === "a4" ? " is-paper-a4" : "") +
+                  (paperLayout === "a4" &&
+                  paperStyle === "exam" &&
+                  examSealEnabled
+                    ? " has-exam-seal"
+                    : "")
+                }
+                style={
+                  paperLayout === "a4"
+                    ? ({
+                        ["--paper-mt"]: `${paperMarginTop}mm`,
+                        ["--paper-mr"]: `${paperMarginRight}mm`,
+                        ["--paper-mb"]: `${paperMarginBottom}mm`,
+                        ["--paper-ml"]: `${paperMarginLeft}mm`,
+                      } as CSSProperties)
+                    : undefined
+                }
+              >
+                {paperLayout === "a4" && paperStyle === "exam" ? (
+                  <ExamPaperChrome
+                    school={examSchool}
+                    title={examTitle}
+                    headerEnabled={examHeaderEnabled}
+                    sealEnabled={examSealEnabled}
+                    onSchoolChange={(v) => {
+                      setExamSchool(v);
+                      void settingsSet({ examSchool: v }).catch(() => {});
+                    }}
+                    onTitleChange={(v) => {
+                      setExamTitle(v);
+                      void settingsSet({ examTitle: v }).catch(() => {});
+                    }}
+                  />
+                ) : null}
+                <CrepeEditor
+                  key={htmlEnabled ? "html-on" : "html-off"}
+                  ref={editorRef}
+                  initialMarkdown={markdownRef.current}
+                  onChange={markDirtyFrom}
+                  onLinkClick={onEditorLinkClick}
+                  onContextMenu={onEditorContextMenu}
+                  onAssetError={(msg) => setStatus(`图片失败: ${msg}`)}
+                  htmlEnabled={htmlEnabled}
+                  docAbsPath={activeDocAbs}
+                  focusMode={focusMode}
+                  typewriterMode={typewriterMode}
+                  className="crepe-host"
                 />
-              ) : null}
-              <CrepeEditor
-                key={htmlEnabled ? "html-on" : "html-off"}
-                ref={editorRef}
-                initialMarkdown={markdownRef.current}
+              </div>
+            </div>
+          ) : null}
+          {activeEditorMod.live === "structured" &&
+          activeEditorMod.structuredKind ? (
+            <div
+              className={
+                sourceMode ? "editor-layer is-hidden" : "editor-layer"
+              }
+            >
+              <StructuredDocEditor
+                kind={activeEditorMod.structuredKind}
+                value={markdown}
                 onChange={markDirtyFrom}
-                onLinkClick={onEditorLinkClick}
-                onContextMenu={onEditorContextMenu}
-                onAssetError={(msg) => setStatus(`图片失败: ${msg}`)}
-                htmlEnabled={htmlEnabled}
-                docAbsPath={activeDocAbs}
-                focusMode={focusMode}
-                typewriterMode={typewriterMode}
-                className="crepe-host"
+                active={!sourceMode}
               />
             </div>
-          </div>
+          ) : null}
           <SourceEditor
             ref={sourceRef}
             value={markdown}
             onChange={markDirtyFrom}
             theme={theme}
-            active={sourceMode}
+            extensions={activeEditorMod.sourceExtensions()}
+            extensionsKey={`${activeEditorMod.id}:${activeEditorMod.sourceLanguage}`}
+            active={
+              sourceMode || activeEditorMod.live === "source"
+            }
             onContextMenu={onEditorContextMenu}
           />
         </main>
-        {showOutline || showAiPanel ? (
+        {(showOutline && activeEditorMod.live === "crepe") || showAiPanel ? (
           <aside className="sidebar right sidebar-right-stack">
-            {showOutline ? (
+            {showOutline && activeEditorMod.live === "crepe" ? (
               <div className="outline-pane">
                 <div className="panel-title">大纲</div>
                 <Outline markdown={markdown} onJump={jumpOutline} />
@@ -1693,7 +1835,15 @@ export default function App() {
       <footer className="status-bar">
         <span>{status}</span>
         <span className="status-mode">
-          {sourceMode ? "源代码" : "Live"}
+          {activeEditorMod.live === "source"
+            ? `纯文本 · ${activeEditorMod.sourceLanguage}`
+            : activeEditorMod.live === "structured"
+              ? sourceMode
+                ? `源码 · ${activeEditorMod.structuredKind?.toUpperCase()}`
+                : `Live · ${activeEditorMod.structuredKind?.toUpperCase()}`
+              : sourceMode
+                ? "源代码"
+                : "Live"}
           {tabs.length > 1 ? ` · ${tabs.length} 标签` : ""}
           {focusMode ? " · 专注" : ""}
           {typewriterMode ? " · 打字机" : ""}

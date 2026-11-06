@@ -371,23 +371,6 @@ pub fn read_export_image_bytes(src: &str, ctx: &ExportAssetCtx) -> Option<Vec<u8
     ensure_docx_raster(bytes, src)
 }
 
-/// 从 HTML 片段提取所有本地可解析的 img src（按出现顺序）。
-pub fn extract_local_img_srcs(html: &str) -> Vec<String> {
-    let fragment = Html::parse_fragment(html);
-    let Ok(sel) = Selector::parse("img[src]") else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for img in fragment.select(&sel) {
-        if let Some(src) = img.value().attr("src") {
-            if needs_embed(src) {
-                out.push(src.to_string());
-            }
-        }
-    }
-    out
-}
-
 /// DOCX 用：本地相对路径 + http(s) + data URL 的 `img[src]`（含 `<picture>` 内）。
 pub fn extract_export_img_srcs(html: &str) -> Vec<String> {
     let fragment = Html::parse_fragment(html);
@@ -589,11 +572,13 @@ mod tests {
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
  </picture>
 </a>"#;
-        let local = extract_local_img_srcs(html);
-        assert!(local.is_empty(), "remote should not be local-only: {local:?}");
         let all = extract_export_img_srcs(html);
         assert_eq!(all.len(), 1);
         assert!(all[0].starts_with("https://api.star-history.com/svg?"));
+        assert!(
+            !all.iter().any(|s| needs_embed(s)),
+            "remote src must not be treated as local embed: {all:?}"
+        );
     }
 
     #[test]

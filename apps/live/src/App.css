@@ -346,6 +346,37 @@ body,
   padding: 4px 8px;
 }
 
+.tree-ctx-menu {
+  position: fixed;
+  z-index: 1400;
+  min-width: 8.5rem;
+  padding: 0.25em;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 6px;
+  background: Canvas;
+  box-shadow: 0 6px 20px color-mix(in srgb, CanvasText 18%, transparent);
+  font-size: 12px;
+}
+
+.tree-ctx-item {
+  display: block;
+  width: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0.4em 0.65em;
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tree-ctx-item:hover {
+  background: color-mix(in srgb, #2563eb 14%, Canvas);
+}
+
 .outline-list {
   list-style: none;
   margin: 0;
@@ -852,6 +883,135 @@ body,
 .source-host .cm-editor:not(.cm-focused) .cm-activeLine,
 .source-host .cm-editor:not(.cm-focused) .cm-activeLineGutter {
   background-color: transparent;
+}
+
+.struct-host {
+  height: 100%;
+  overflow: auto;
+  padding: 12px 16px 24px;
+  background: var(--editor-bg, Canvas);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.struct-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.struct-badge {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent, #2563eb);
+}
+
+.struct-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.struct-error {
+  color: var(--danger, #b91c1c);
+  background: color-mix(in srgb, var(--danger, #b91c1c) 10%, transparent);
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+
+.struct-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+.struct-child {
+  margin-left: 1.1rem;
+  border-left: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+  padding-left: 0.55rem;
+}
+
+.struct-key {
+  font-weight: 600;
+  min-width: 2rem;
+}
+
+.struct-type {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.struct-muted {
+  color: var(--muted);
+}
+
+.struct-eq {
+  color: var(--muted);
+}
+
+.struct-input {
+  flex: 1;
+  min-width: 6rem;
+  font: inherit;
+  padding: 0.25em 0.45em;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  border-radius: 4px;
+  background: Canvas;
+  color: inherit;
+}
+
+.struct-key-input {
+  flex: 0 1 9rem;
+  max-width: 12rem;
+  font-weight: 600;
+}
+
+.struct-select {
+  font: inherit;
+  padding: 0.2em 0.35em;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  background: Canvas;
+  color: inherit;
+}
+
+.struct-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  background: transparent;
+  color: inherit;
+  border-radius: 4px;
+  padding: 0.2em 0.45em;
+  font: inherit;
+  cursor: pointer;
+}
+
+.struct-btn:hover {
+  background: var(--accent-soft, color-mix(in srgb, #2563eb 12%, Canvas));
+}
+
+.struct-btn.danger {
+  color: var(--danger, #b91c1c);
+}
+
+.struct-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  width: 1.2rem;
+  padding: 0;
+  font: inherit;
+}
+
+.struct-ini-sec {
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px dashed color-mix(in srgb, CanvasText 14%, transparent);
 }
 
 /* HTML-in-MD：块级在 Shadow DOM 内渲染（不受下列规则影响） */

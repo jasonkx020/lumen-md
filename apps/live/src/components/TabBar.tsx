@@ -5,9 +5,11 @@ type Props = {
   activeId: string | null;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  /** 悬停提示：优先完整绝对路径 */
+  pathTitle?: (tab: EditorTab) => string;
 };
 
-export function TabBar({ tabs, activeId, onSelect, onClose }: Props) {
+export function TabBar({ tabs, activeId, onSelect, onClose, pathTitle }: Props) {
   if (tabs.length === 0) {
     return null;
   }
@@ -16,13 +18,15 @@ export function TabBar({ tabs, activeId, onSelect, onClose }: Props) {
     <div className="tab-bar" role="tablist" aria-label="打开的文件">
       {tabs.map((tab) => {
         const active = tab.id === activeId;
+        const tip =
+          pathTitle?.(tab) ?? tab.absPath ?? tab.relPath ?? tab.title;
         return (
           <div
             key={tab.id}
             className={"tab-item" + (active ? " is-active" : "")}
             role="tab"
             aria-selected={active}
-            title={tab.absPath ?? tab.relPath ?? tab.title}
+            title={tip}
           >
             <button
               type="button"

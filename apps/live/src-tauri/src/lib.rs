@@ -95,12 +95,13 @@ fn open_absolute_file(
     path: String,
 ) -> Result<OpenFileResult, String> {
     let p = PathBuf::from(&path);
+    if p.is_dir() {
+        return Err("是目录".into());
+    }
     if !p.is_file() {
         return Err("不是文件".into());
     }
-    if !is_allowed_text_ext(&p) {
-        return Err("仅支持 Markdown / 文本文件".into());
-    }
+    // 已知文本后缀直接开；未知后缀也尝试按文本解码（二进制在 decode 时拒绝）
     let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
 
     // 已在当前工作区内 → workspace 模式
@@ -122,7 +123,7 @@ fn open_absolute_file(
         }
     }
 
-    // 独立文件：加入白名单，不打开父目录为工作区
+    // 独立文件：按文本打开并加入写白名单（不挂父目录为工作区）
     let content = read_abs_text(&canon).map_err(map_err)?;
     state.allowed_abs.lock().insert(canon.clone());
     let abs_s = canon.to_string_lossy().into_owned();
@@ -225,7 +226,7 @@ fn register_and_write_abs(
 ) -> Result<String, String> {
     let p = PathBuf::from(&path);
     if !is_allowed_text_ext(&p) {
-        return Err("仅允许 .md / .markdown / .txt".into());
+        return Err("仅允许保存为受支持的文本扩展名".into());
     }
     if content.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("内容超过软上限 {} bytes", MAX_FILE_BYTES));
@@ -422,7 +423,7 @@ fn resolve_doc_link(
                 abs_path: None,
                 exists: true,
                 open_url: None,
-                message: Some("仅允许打开 Markdown / 文本文件".into()),
+                message: Some("仅允许打开可编辑文本文件".into()),
             });
         }
 
@@ -763,10 +764,7 @@ fn workspace_search(
                     stack.push(path);
                     continue;
                 }
-                if !(name.ends_with(".md")
-                    || name.ends_with(".markdown")
-                    || name.ends_with(".txt"))
-                {
+                if !is_allowed_text_ext(&path) {
                     continue;
                 }
                 let Ok(text) = std::fs::read_to_string(&path) else {
@@ -832,7 +830,7 @@ fn parse_open_path_arg(raw: &str) -> Option<PathBuf> {
     Some(PathBuf::from(s))
 }
 
-/// 从命令行参数中提取可打开的 Markdown/文本路径。
+/// 从命令行参数中提取可打开的文件路径（目录跳过；是否文本在 open 时再校验）。
 fn collect_open_files_from_args<I, S>(args: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -844,9 +842,6 @@ where
             continue;
         };
         if !p.is_file() {
-            continue;
-        }
-        if !is_allowed_text_ext(&p) {
             continue;
         }
         let display = std::fs::canonicalize(&p)
@@ -915,13 +910,29 @@ fn take_startup_files(state: State<'_, AppState>) -> Result<Vec<String>, String>
     Ok(std::mem::take(&mut *state.startup_files.lock()))
 }
 
+/// 将主窗口从后台/最小化恢复到前台并聚焦。
+/// 二次实例打开文件时由 single-instance 回调调用；Windows 上配合插件 2.4.5+ 的
+/// AllowSetForegroundWindow，否则仅 set_focus 常被系统拒绝。
+fn bring_main_window_to_front(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = win.show();
+    let _ = win.unminimize();
+    let _ = win.set_focus();
+    // 兜底：短暂置顶再取消，避免仍被其他窗口挡住
+    let _ = win.set_always_on_top(true);
+    let _ = win.set_always_on_top(false);
+}
+
 fn emit_open_files(app: &tauri::AppHandle, files: Vec<String>) {
     if files.is_empty() {
         return;
     }
     use tauri::{Emitter, Manager};
+    bring_main_window_to_front(app);
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
         let _ = win.emit("open-files", files);
     } else {
         let _ = app.emit("open-files", files);
@@ -955,18 +966,21 @@ pub fn run() {
     {
         use tauri::Manager;
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 无论是否带文件，二次启动都应把已有窗口拉到前台
+            bring_main_window_to_front(app);
             let files = collect_open_files_from_args(argv.iter().skip(1).map(|s| s.as_str()));
-            if !files.is_empty() {
-                if let Some(state) = app.try_state::<AppState>() {
-                    let mut q = state.startup_files.lock();
-                    for f in &files {
-                        if !q.iter().any(|x| x == f) {
-                            q.push(f.clone());
-                        }
+            if files.is_empty() {
+                return;
+            }
+            if let Some(state) = app.try_state::<AppState>() {
+                let mut q = state.startup_files.lock();
+                for f in &files {
+                    if !q.iter().any(|x| x == f) {
+                        q.push(f.clone());
                     }
                 }
-                emit_open_files(app, files);
             }
+            emit_open_files(app, files);
         }));
     }
     builder = builder

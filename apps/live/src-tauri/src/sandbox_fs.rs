@@ -90,11 +90,7 @@ impl Workspace {
             } else {
                 format!("{}/{}", rel.trim_end_matches('/'), name)
             };
-            if is_dir
-                || name.ends_with(".md")
-                || name.ends_with(".markdown")
-                || name.ends_with(".txt")
-            {
+            if is_dir || is_allowed_text_ext(Path::new(&name)) {
                 out.push(FileEntry {
                     name,
                     rel_path: child_rel.replace('\\', "/"),
@@ -165,8 +161,27 @@ impl Workspace {
     }
 }
 
+/// 采样前 8KB：含 NUL，或异常控制字符占比过高，则视为二进制。
+pub fn looks_like_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.contains(&0) {
+        return true;
+    }
+    let non_text = sample
+        .iter()
+        .filter(|&&b| b < 0x09 || (b > 0x0d && b < 0x20) || b == 0x7f)
+        .count();
+    non_text * 100 / sample.len() > 10
+}
+
 /// Decode file bytes: UTF-8 → GB18030 → BOM-sniff → GB18030 lossy.
 fn decode_text_bytes(bytes: Vec<u8>) -> anyhow::Result<String> {
+    if looks_like_binary(&bytes) {
+        anyhow::bail!("二进制文件，无法按文本打开");
+    }
     match String::from_utf8(bytes) {
         Ok(s) => Ok(s),
         Err(e) => {
@@ -230,10 +245,90 @@ pub fn write_abs_text(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 可按纯文本打开/编辑/保存的扩展名（小写、无点）。
+pub const ALLOWED_TEXT_EXTS: &[&str] = &[
+    // 文档
+    "md",
+    "markdown",
+    "txt",
+    "log",
+    "csv",
+    "tsv",
+    // 数据 / 配置
+    "json",
+    "yml",
+    "yaml",
+    "xml",
+    "toml",
+    "ini",
+    "conf",
+    "cfg",
+    "env",
+    // 脚本
+    "bat",
+    "cmd",
+    "ps1",
+    "sh",
+    "bash",
+    "zsh",
+    // 代码 / 前端
+    "py",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "tsx",
+    "jsx",
+    "css",
+    "scss",
+    "html",
+    "htm",
+    "rs",
+    "go",
+    "java",
+    "c",
+    "h",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "rb",
+    "lua",
+    "sql",
+];
+
 pub fn is_allowed_text_ext(path: &Path) -> bool {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    name.ends_with(".md") || name.ends_with(".markdown") || name.ends_with(".txt")
+    let Some(dot) = name.rfind('.') else {
+        return false;
+    };
+    let ext = &name[dot + 1..];
+    if ext.is_empty() {
+        return false;
+    }
+    ALLOWED_TEXT_EXTS.iter().any(|e| *e == ext)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_script_and_config_exts() {
+        assert!(is_allowed_text_ext(Path::new("a.bat")));
+        assert!(is_allowed_text_ext(Path::new("run.SH")));
+        assert!(is_allowed_text_ext(Path::new("cfg.json")));
+        assert!(is_allowed_text_ext(Path::new("note.markdown")));
+        assert!(!is_allowed_text_ext(Path::new("app.exe")));
+        assert!(!is_allowed_text_ext(Path::new("noext")));
+    }
+
+    #[test]
+    fn rejects_nul_as_binary() {
+        assert!(looks_like_binary(b"abc\0def"));
+        assert!(!looks_like_binary(b"hello\r\nworld\t!"));
+    }
 }
